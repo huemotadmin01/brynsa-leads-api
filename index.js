@@ -29,6 +29,12 @@ async function startServer() {
           return res.status(400).json({ success: false, message: 'Missing required fields' });
         }
 
+        // 🛡️ Check if lead already exists by LinkedIn URL
+const existing = await leads.findOne({ linkedinUrl: lead.linkedinUrl });
+if (existing) {
+  return res.status(200).json({ message: 'Lead already exists', inserted: false });
+}
+
         await leads.insertOne(lead);
         res.status(200).json({ success: true, message: 'Lead saved to MongoDB!' });
       } catch (err) {
