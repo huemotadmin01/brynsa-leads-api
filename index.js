@@ -1,12 +1,17 @@
-require('dotenv').config(); // Load .env variables
+require('dotenv').config();
+console.log('🧪 ENV:', process.env); // ← ADD THIS LINE
+
 const express = require('express');
 const { MongoClient } = require('mongodb');
 
 const app = express();
 app.use(express.json());
 
-const uri = process.env.MONGO_URI;
-const client = new MongoClient(uri);
+const mongoUrl = process.env.MONGO_URL;
+
+console.log('🔗 Mongo URL:', mongoUrl); // ← ADD THIS LINE
+
+const client = new MongoClient(mongoUrl);
 
 async function startServer() {
   try {
