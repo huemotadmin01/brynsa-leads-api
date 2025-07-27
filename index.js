@@ -1,10 +1,10 @@
 require('dotenv').config();
-console.log('🧪 ENV:', process.env); // ← ADD THIS LINE
-
 const express = require('express');
+const cors = require('cors');
 const { MongoClient } = require('mongodb');
 
 const app = express();
+app.use(cors()); // 🔓 Enable CORS
 app.use(express.json());
 
 const mongoUrl = process.env.MONGO_URL;
