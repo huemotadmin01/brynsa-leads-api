@@ -20,8 +20,7 @@ async function startServer() {
 
     const db = client.db('brynsaleads'); // Match your cluster/database name
     const leads = db.collection('leads');
-
-    app.post('/save-lead', async (req, res) => {
+    app.post('/api/leads', async (req, res) => {
       try {
         const lead = req.body;
 
