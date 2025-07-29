@@ -43,7 +43,7 @@ if (existing) {
     });
 
 
-    const fetch = require('node-fetch'); // make sure this is installed
+    /*const fetch = require('node-fetch'); // make sure this is installed
 
     app.post('/proxy-to-sheet', async (req, res) => {
       try {
@@ -62,7 +62,7 @@ if (existing) {
         console.error('❌ Proxy to Google Sheets failed:', err.message);
         res.status(500).json({ success: false, error: err.message });
       }
-    });
+    });*/
     
 
     
