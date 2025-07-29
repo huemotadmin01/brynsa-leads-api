@@ -1,0 +1,26 @@
+name: Email Enrichment Update
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"  # Runs daily at 2 AM UTC
+
+jobs:
+  enrich-emails-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run enrichment update script
+        env:
+          MONGO_URL: ${{ secrets.MONGO_URL }}
+        run: node enrichEmails_update.js
