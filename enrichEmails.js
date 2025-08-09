@@ -1,4 +1,4 @@
-const { MongoClient } = require("mongodb");
+/*const { MongoClient } = require("mongodb");
 
 const client = new MongoClient(process.env.MONGO_URL);
 
@@ -45,6 +45,123 @@ async function enrichEmails() {
     }
 
     console.log("🎯 Email enrichment audit complete.");
+  } catch (err) {
+    console.error("❌ Error:", err);
+  } finally {
+    await client.close();
+  }
+}
+
+// Extract pattern like "first.last" or "firstlast"
+function extractEmailPattern(email, fullName) {
+  const domain = email.split("@")[1];
+  const local = email.split("@")[0];
+  const [firstName, lastName] = fullName.toLowerCase().split(" ");
+
+  if (local === `${firstName}.${lastName}`) return "first.last";
+  if (local === `${firstName}${lastName}`) return "firstlast";
+  if (local === `${firstName[0]}${lastName}`) return "fLast";
+  if (local === `${firstName}`) return "first";
+  return null;
+}
+
+function applyEmailPattern(pattern, fullName, originalEmail) {
+  const domain = originalEmail.split("@")[1];
+  const [firstName, lastName] = fullName.toLowerCase().split(" ");
+
+  switch (pattern) {
+    case "first.last":
+      return `${firstName}.${lastName}@${domain}`;
+    case "firstlast":
+      return `${firstName}${lastName}@${domain}`;
+    case "fLast":
+      return `${firstName[0]}${lastName}@${domain}`;
+    case "first":
+      return `${firstName}@${domain}`;
+    default:
+      return null;
+  }
+}
+
+enrichEmails();*/
+
+const { MongoClient } = require("mongodb");
+
+if (!process.env.MONGO_URL) {
+  console.error("❌ MONGO_URL is missing. Set it in your environment variables.");
+  process.exit(1);
+}
+
+const client = new MongoClient(process.env.MONGO_URL);
+
+async function enrichEmails() {
+  try {
+    await client.connect();
+    const db = client.db("brynsaleads");
+    const leads = db.collection("leads");
+    const enrichedCollection = db.collection("enriched_audit");
+
+    console.log("✅ Connected to DB:", db.databaseName);
+    console.log("📊 Total leads:", await leads.estimatedDocumentCount());
+
+    // Find leads with missing emails
+    const missingEmailLeads = await leads.find({ email: "noemail@domain.com" }).toArray();
+    console.log(`🔍 Found ${missingEmailLeads.length} leads with missing emails.`);
+
+    for (const lead of missingEmailLeads) {
+      console.log(`\n➡ Processing lead: ${lead.name} | Company: ${lead.companyName}`);
+
+      const { name, companyName } = lead;
+      if (!name || !companyName) {
+        console.log("⏩ Skipped: Missing name or companyName");
+        continue;
+      }
+
+      // Find another lead from same company with a valid email
+      const existingLead = await leads.findOne({
+        companyName: companyName,
+        email: { $not: /noemail@domain.com/i }
+      });
+
+      if (!existingLead) {
+        console.log("⏩ Skipped: No other lead with valid email found for this company.");
+        continue;
+      }
+
+      console.log(`✅ Found existing lead with email: ${existingLead.email}`);
+
+      const email = existingLead.email.split(",")[0].trim(); // first email
+      const emailPattern = extractEmailPattern(email, existingLead.name);
+
+      if (!emailPattern) {
+        console.log("⏩ Skipped: Could not extract pattern from existing lead email.");
+        continue;
+      }
+
+      console.log(`📌 Email pattern detected: ${emailPattern}`);
+
+      const enrichedEmail = applyEmailPattern(emailPattern, name, email);
+      if (!enrichedEmail) {
+        console.log("⏩ Skipped: Could not apply pattern to generate enriched email.");
+        continue;
+      }
+
+      console.log(`💡 Enriched email generated: ${enrichedEmail}`);
+
+      // Insert audit record
+      const insertResult = await enrichedCollection.insertOne({
+        leadId: lead._id,
+        companyName: companyName,
+        originalName: lead.name,
+        enrichedEmail: enrichedEmail,
+        pattern: emailPattern,
+        timestamp: new Date()
+      });
+
+      console.log(`📝 Inserted audit record with _id: ${insertResult.insertedId}`);
+    }
+
+    console.log("\n🎯 Email enrichment audit complete.");
   } catch (err) {
     console.error("❌ Error:", err);
   } finally {
