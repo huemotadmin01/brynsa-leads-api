@@ -42,32 +42,6 @@ if (existing) {
       }
     });
 
-
-    /*const fetch = require('node-fetch'); // make sure this is installed
-
-    app.post('/proxy-to-sheet', async (req, res) => {
-      try {
-        const googleSheetWebhook = 'https://script.google.com/macros/s/AKfycbxggAKO9lOHYqCe881LL6wOvVmW4lD98d2i505HfRI9rvHmADQC1nn0xpY74SNR1L5s/exec';
-    
-        const response = await fetch(googleSheetWebhook, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(req.body)
-        });
-    
-        const text = await response.text();
-        console.log('✅ Google Sheets response:', text);
-        res.status(200).json({ success: true, googleResponse: text });
-      } catch (err) {
-        console.error('❌ Proxy to Google Sheets failed:', err.message);
-        res.status(500).json({ success: false, error: err.message });
-      }
-    });*/
-    
-
-    
-
-
     app.listen(3000, () => {
       console.log('🚀 Server is running on http://localhost:3000');
     });
