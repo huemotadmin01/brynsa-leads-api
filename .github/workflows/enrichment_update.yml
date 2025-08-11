@@ -1,9 +1,9 @@
 name: Email Enrichment Update
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "0 14 * * *"  # 2 PM UTC every day
+    - cron: '0,30 3-14 * * *' # Every 30 mins from 03:00 to 14:59 UTC (covers 9:00 AM–8:59 PM IST)
+  workflow_dispatch: # Allows manual trigger from GitHub
 
 jobs:
   enrich-emails-update:
