@@ -2,10 +2,11 @@ name: Email Enrichment Cron
 
 on:
   schedule:
-    # Every 10 minutes from 8:00 AM to 5:59 PM IST (Monday-Friday)
-    # IST is UTC+5:30, so 8:00 AM IST = 2:30 AM UTC, 6:00 PM IST = 12:30 PM UTC
-    - cron: '30,40,50 2-12 * * 1-5'   # 8:00 AM - 6:00 PM IST (Mon-Fri)
-    - cron: '0,10,20 3-12 * * 1-5'    # Continues the 10-minute intervals
+# 08:00–17:59 IST (Mon–Fri), every 30 mins
+# 02:30–12:00 UTC (Mon–Fri)
+- cron: '30 2 * * 1-5'     # 02:30 UTC  (08:00 IST)
+- cron: '0,30 3-11 * * 1-5' # 03:00–11:30 UTC (08:30–17:00 IST)
+- cron: '0 12 * * 1-5'      # 12:00 UTC  (17:30 IST)
   workflow_dispatch: # Allows manual trigger from GitHub
 
 jobs:
