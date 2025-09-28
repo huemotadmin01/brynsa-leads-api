@@ -37,7 +37,7 @@ function isValidEmail(e) {
 
 // Helper: check if user is admin
 function isAdmin(userEmail) {
-  return userEmail === 'priyanshu.sahu@example.com'; // Update with actual admin email
+  return userEmail === 'priyanshu.sahu@huemot.com';
 }
 
 // CRM Export Functions
@@ -401,7 +401,7 @@ async function startServer() {
         }
 
         // Get CRM configuration (use admin config for all users)
-        const adminEmail = 'priyanshu.sahu@example.com'; // Update with actual admin email
+        const adminEmail = 'priyanshu.sahu@huemot.com';
         const crmConfig = await crmConfigs.findOne({ 
           userId: adminEmail, 
           crmType, 
@@ -485,7 +485,7 @@ async function startServer() {
     // Get available CRM types for export
     app.get('/api/crm/available', async (req, res) => {
       try {
-        const adminEmail = 'priyanshu.sahu@example.com'; // Update with actual admin email
+        const adminEmail = 'priyanshu.sahu@huemot.com';
         
         const availableCRMs = await crmConfigs.find(
           { userId: adminEmail, isActive: true },
