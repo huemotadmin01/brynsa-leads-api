@@ -302,10 +302,10 @@ async function startServer() {
             }]
           ]);
           
-          // Ensure ID is integer, not array
           companyId = Array.isArray(companyResult) ? companyResult[0] : companyResult;
+          isExistingCompany = false;
           clientType = 'New Prospect';
-          console.log('Company created. ID:', companyId, 'Type:', typeof companyId);
+          console.log('Company created. ID:', companyId, 'Client Type:', clientType);
         }
 
         // Check contact
@@ -326,7 +326,7 @@ async function startServer() {
           
           const contactData = {
             name: cleanName,
-            parent_id: parseInt(companyId, 10), // Ensure integer
+            parent_id: parseInt(companyId, 10),
             type: 'contact',
             is_company: false,
             customer_rank: 1
@@ -343,8 +343,10 @@ async function startServer() {
           const func = (leadData.function || '').trim();
           if (func) contactData.function = func;
 
-          const website = (leadData.website || '').trim();
-          if (website) contactData.website = website;
+          const linkedinProfileUrl = (leadData.website || '').trim();
+          if (linkedinProfileUrl && linkedinProfileUrl.includes('linkedin.com/in/')) {
+            contactData.website = linkedinProfileUrl;
+          }
 
           const street = (leadData.street || '').trim();
           if (street) contactData.street = street;
@@ -404,7 +406,7 @@ async function startServer() {
         // Create lead
         const leadCreateData = {
           name: `${cleanName} - LinkedIn Opportunity`,
-          partner_id: parseInt(contactId, 10), // Ensure integer
+          partner_id: parseInt(contactId, 10),
           partner_name: cleanName,
           type: 'opportunity',
           user_id: salespersonId,
@@ -423,14 +425,18 @@ async function startServer() {
         const func = (leadData.function || '').trim();
         if (func) leadCreateData.function = func;
 
-        const website = (leadData.website || '').trim();
-        if (website) leadCreateData.website = website;
+        const linkedinProfileUrl = (leadData.website || '').trim();
+        if (linkedinProfileUrl && linkedinProfileUrl.includes('linkedin.com/in/')) {
+          leadCreateData.website = linkedinProfileUrl;
+        }
 
         const street = (leadData.street || '').trim();
         if (street) leadCreateData.street = street;
 
         const description = (leadData.comment || '').trim() || `Sourced from LinkedIn`;
         if (description) leadCreateData.description = description;
+
+        console.log('Creating lead with data:', { clientType, isExistingCompany });
 
         const leadResult = await callOdoo('crm.lead', 'create', [
           [leadCreateData]
