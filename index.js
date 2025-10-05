@@ -25,7 +25,7 @@ async function startServer() {
 
     const db = client.db('brynsaleads');
     const leads = db.collection('leads');
-    const exportLogs = db.collection('export_logs'); // ← ADD THIS LINE
+    const exportLogs = db.collection('export_logs');
 
     // Create indexes for exportLogs
     await exportLogs.createIndex({ linkedinUrl: 1, exportedBy: 1 });
@@ -108,9 +108,9 @@ async function startServer() {
       }
     });
 
-    // ========== ODOO CRM EXPORT ENDPOINTS (MOVED INSIDE startServer) ==========
+    // ========== ODOO CRM EXPORT ENDPOINTS (JSON-RPC VERSION) ==========
 
-    // Direct Odoo Export Endpoint
+    // Direct Odoo Export Endpoint using JSON-RPC
     app.post('/api/crm/export-odoo', async (req, res) => {
       try {
         const { leadData, crmConfig, userEmail, linkedinUrl } = req.body;
@@ -149,46 +149,95 @@ async function startServer() {
           });
         }
 
-        // Prepare Odoo API payload
-        const odooPayload = {
-          name: leadData.name,
-          email: leadData.email || '',
-          phone: leadData.phone || '',
-          function: leadData.function || '',
-          website: leadData.website || '',
-          street: leadData.street || '',
-          comment: leadData.comment || '',
-          is_company: false,
-          customer_rank: 1,
-          supplier_rank: 0,
-          partner_type: 'contact'
+        // Step 1: Authenticate with Odoo using JSON-RPC
+        console.log('🔐 Authenticating with Odoo...');
+        
+        const authUrl = `${crmConfig.endpointUrl}/web/session/authenticate`;
+        const authPayload = {
+          jsonrpc: "2.0",
+          params: {
+            db: crmConfig.databaseName,
+            login: crmConfig.username,
+            password: crmConfig.password
+          }
         };
 
-        console.log('🔄 Calling Odoo API...');
+        const authResponse = await fetch(authUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(authPayload)
+        });
 
-        // Call Odoo API
-        const odooResponse = await fetch(`${crmConfig.endpointUrl}/api/res.partner`, {
+        if (!authResponse.ok) {
+          const errorText = await authResponse.text().catch(() => 'Unknown error');
+          console.error('❌ Odoo authentication failed:', errorText);
+          throw new Error(`Odoo authentication failed: ${authResponse.status}`);
+        }
+
+        const authResult = await authResponse.json();
+        
+        if (!authResult.result || authResult.result.uid === false) {
+          console.error('❌ Odoo authentication failed:', authResult);
+          throw new Error('Invalid Odoo credentials');
+        }
+
+        const userId = authResult.result.uid;
+        const sessionId = authResult.result.session_id;
+        
+        console.log('✅ Authenticated successfully. User ID:', userId);
+
+        // Step 2: Create partner record using JSON-RPC
+        console.log('🔄 Creating contact in Odoo...');
+
+        const createUrl = `${crmConfig.endpointUrl}/web/dataset/call_kw`;
+        const createPayload = {
+          jsonrpc: "2.0",
+          method: "call",
+          params: {
+            model: "res.partner",
+            method: "create",
+            args: [{
+              name: leadData.name,
+              email: leadData.email || '',
+              phone: leadData.phone || '',
+              function: leadData.function || '',
+              website: leadData.website || '',
+              street: leadData.street || '',
+              comment: leadData.comment || '',
+              is_company: false,
+              customer_rank: 1
+            }],
+            kwargs: {}
+          },
+          id: Date.now()
+        };
+
+        const createResponse = await fetch(createUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Basic ${Buffer.from(`${crmConfig.username}:${crmConfig.password}`).toString('base64')}`
+            'Cookie': `session_id=${sessionId}`
           },
-          body: JSON.stringify(odooPayload)
+          body: JSON.stringify(createPayload)
         });
 
-        if (!odooResponse.ok) {
-          const errorText = await odooResponse.text().catch(() => 'Unknown error');
-          console.error('❌ Odoo API error:', {
-            status: odooResponse.status,
-            statusText: odooResponse.statusText,
-            error: errorText
-          });
-          
-          throw new Error(`Odoo API error: ${odooResponse.status} - ${errorText}`);
+        if (!createResponse.ok) {
+          const errorText = await createResponse.text().catch(() => 'Unknown error');
+          console.error('❌ Odoo contact creation failed:', errorText);
+          throw new Error(`Odoo contact creation failed: ${createResponse.status}`);
         }
 
-        const odooResult = await odooResponse.json();
-        console.log('✅ Odoo export successful:', odooResult);
+        const createResult = await createResponse.json();
+        
+        if (createResult.error) {
+          console.error('❌ Odoo API error:', createResult.error);
+          throw new Error(createResult.error.data?.message || 'Odoo API error');
+        }
+
+        const contactId = createResult.result;
+        console.log('✅ Odoo contact created successfully. ID:', contactId);
 
         // Log export to database
         try {
@@ -197,11 +246,11 @@ async function startServer() {
             leadEmail: leadData.email,
             linkedinUrl: linkedinUrl,
             crmType: 'odoo',
-            crmId: odooResult.id || odooResult.result?.id || 'unknown',
+            crmId: contactId,
             exportedBy: userEmail,
             exportedAt: new Date(),
             status: 'success',
-            odooResponse: odooResult
+            odooUserId: userId
           });
           console.log('📝 Export logged to database');
         } catch (logError) {
@@ -211,7 +260,7 @@ async function startServer() {
         res.json({
           success: true,
           message: 'Lead exported to Odoo successfully',
-          crmId: odooResult.id || odooResult.result?.id || 'created',
+          crmId: contactId,
           crmType: 'odoo'
         });
 
