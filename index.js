@@ -109,244 +109,324 @@ async function startServer() {
 
     // ========== ODOO CRM EXPORT - CORRECTED ENDPOINT ==========
 
-    app.post('/api/crm/export-odoo', async (req, res) => {
-      try {
-        const { leadData, crmConfig, userEmail, linkedinUrl } = req.body;
+// Complete replacement for the /api/crm/export-odoo endpoint
 
-        if (!leadData || !leadData.name) {
-          return res.status(400).json({ error: 'Lead data with name is required' });
+app.post('/api/crm/export-odoo', async (req, res) => {
+  try {
+    const { leadData, crmConfig, userEmail, linkedinUrl } = req.body;
+
+    if (!leadData || !leadData.name) {
+      return res.status(400).json({ error: 'Lead data with name is required' });
+    }
+
+    if (!crmConfig || !crmConfig.endpointUrl || !crmConfig.username || !crmConfig.password) {
+      return res.status(400).json({ error: 'CRM configuration is incomplete' });
+    }
+
+    console.log('📤 Odoo CRM export - Multi-step process:', {
+      lead: leadData.name,
+      company: leadData.companyName || 'N/A',
+      sourcedBy: leadData.sourcedBy
+    });
+
+    // Check if already exported
+    const existingExport = await exportLogs.findOne({
+      linkedinUrl: linkedinUrl,
+      exportedBy: userEmail,
+      crmType: 'odoo',
+      status: 'success'
+    });
+
+    if (existingExport) {
+      return res.status(200).json({
+        success: true,
+        message: 'Lead already exported to Odoo CRM',
+        crmId: existingExport.crmId,
+        crmType: 'odoo',
+        alreadyExisted: true,
+        exportedAt: existingExport.exportedAt
+      });
+    }
+
+    // Step 1: Authenticate
+    console.log('🔐 Authenticating...');
+    const authUrl = `${crmConfig.endpointUrl}/web/session/authenticate`;
+    const authResponse = await fetch(authUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        params: {
+          db: crmConfig.databaseName,
+          login: crmConfig.username,
+          password: crmConfig.password
         }
+      })
+    });
 
-        if (!crmConfig || !crmConfig.endpointUrl || !crmConfig.username || !crmConfig.password) {
-          return res.status(400).json({ error: 'CRM configuration is incomplete' });
-        }
+    if (!authResponse.ok) {
+      throw new Error(`Authentication failed: ${authResponse.status}`);
+    }
 
-        console.log('📤 Odoo export request:', {
-          lead: leadData.name,
-          user: userEmail,
-          endpoint: crmConfig.endpointUrl
-        });
+    const setCookieHeader = authResponse.headers.get('set-cookie');
+    let cookies = '';
+    if (setCookieHeader) {
+      cookies = setCookieHeader.split(',').map(c => c.trim().split(';')[0]).join('; ');
+    }
 
-        // Check if already exported
-        const existingExport = await exportLogs.findOne({
-          linkedinUrl: linkedinUrl,
-          exportedBy: userEmail,
-          crmType: 'odoo',
-          status: 'success'
-        });
+    const authResult = await authResponse.json();
+    if (!authResult.result?.uid) {
+      throw new Error('Invalid Odoo credentials');
+    }
 
-        if (existingExport) {
-          console.log('ℹ️ Lead already exported:', existingExport.crmId);
-          return res.status(200).json({
-            success: true,
-            message: 'Lead already exported to Odoo',
-            crmId: existingExport.crmId,
-            crmType: 'odoo',
-            alreadyExisted: true,
-            exportedAt: existingExport.exportedAt
-          });
-        }
+    const userId = authResult.result.uid;
+    const sessionId = authResult.result.session_id;
+    if (!cookies && sessionId) cookies = `session_id=${sessionId}`;
 
-        // Step 1: Authenticate
-        console.log('🔐 Authenticating with Odoo...');
-        
-        const authUrl = `${crmConfig.endpointUrl}/web/session/authenticate`;
-        const authPayload = {
-          jsonrpc: "2.0",
-          params: {
-            db: crmConfig.databaseName,
-            login: crmConfig.username,
-            password: crmConfig.password
-          }
-        };
+    console.log('✅ Authenticated. User ID:', userId);
 
-        const authResponse = await fetch(authUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(authPayload)
-        });
+    const odooUrl = `${crmConfig.endpointUrl}/jsonrpc`;
 
-        if (!authResponse.ok) {
-          throw new Error(`Odoo authentication failed: ${authResponse.status}`);
-        }
-
-        const setCookieHeader = authResponse.headers.get('set-cookie');
-        let cookies = '';
-        if (setCookieHeader) {
-          const cookieArray = setCookieHeader.split(',').map(cookie => cookie.trim().split(';')[0]);
-          cookies = cookieArray.join('; ');
-        }
-
-        const authResult = await authResponse.json();
-        
-        if (!authResult.result || authResult.result.uid === false) {
-          throw new Error('Invalid Odoo credentials');
-        }
-
-        const userId = authResult.result.uid;
-        const sessionId = authResult.result.session_id;
-        
-        if (!cookies && sessionId) {
-          cookies = `session_id=${sessionId}`;
-        }
-        
-        console.log('✅ Authenticated. User ID:', userId);
-
-        // Step 2: Create contact - CORRECTED URL
-        console.log('🔄 Creating contact...');
-
-        const createUrl = `${crmConfig.endpointUrl}/jsonrpc`;
-        const createPayload = {
+    // Helper function to call Odoo
+    async function callOdoo(model, method, args) {
+      const response = await fetch(odooUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cookie': cookies
+        },
+        body: JSON.stringify({
           jsonrpc: "2.0",
           method: "call",
           params: {
             service: "object",
             method: "execute_kw",
-            args: [
-              crmConfig.databaseName,
-              userId,
-              crmConfig.password,
-              "res.partner",
-              "create",
-              [{
-                name: leadData.name,
-                email: leadData.email || '',
-                phone: leadData.phone || '',
-                function: leadData.function || '',
-                website: leadData.website || '',
-                street: leadData.street || '',
-                comment: leadData.comment || '',
-                is_company: false,
-                customer_rank: 1
-              }]
-            ]
+            args: [crmConfig.databaseName, userId, crmConfig.password, model, method, args]
           },
           id: Date.now()
-        };
+        })
+      });
 
-        console.log('Calling:', createUrl);
+      if (!response.ok) {
+        throw new Error(`Odoo API failed: ${response.status}`);
+      }
 
-        const createResponse = await fetch(createUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Cookie': cookies
-          },
-          body: JSON.stringify(createPayload)
-        });
+      const result = await response.json();
+      if (result.error) {
+        throw new Error(result.error.data?.message || result.error.message || 'Odoo API error');
+      }
 
-        if (!createResponse.ok) {
-          const errorText = await createResponse.text().catch(() => 'Unknown');
-          console.error('Contact creation failed:', errorText);
-          throw new Error(`Contact creation failed: ${createResponse.status}`);
+      return result.result;
+    }
+
+    // Step 2: Find or get salesperson ID by sourcedBy name
+    console.log('👤 Finding salesperson:', leadData.sourcedBy);
+    
+    let salespersonId = null;
+    if (leadData.sourcedBy) {
+      const salespersons = await callOdoo('res.users', 'search_read', [
+        [['name', 'ilike', leadData.sourcedBy]],
+        ['id', 'name']
+      ]);
+      
+      if (salespersons && salespersons.length > 0) {
+        salespersonId = salespersons[0].id;
+        console.log('✅ Found salesperson ID:', salespersonId);
+      } else {
+        console.log('⚠️ Salesperson not found, will use current user');
+        salespersonId = userId;
+      }
+    } else {
+      salespersonId = userId;
+    }
+
+    // Step 3: Check if company exists
+    console.log('🏢 Checking company:', leadData.companyName);
+    
+    const existingCompanies = await callOdoo('res.partner', 'search_read', [
+      [['name', '=', leadData.companyName], ['is_company', '=', true]],
+      ['id', 'name', 'user_id']
+    ]);
+
+    let companyId;
+    let isExistingCompany = false;
+    let clientType;
+
+    if (existingCompanies && existingCompanies.length > 0) {
+      companyId = existingCompanies[0].id;
+      isExistingCompany = true;
+      clientType = 'Existing Client';
+      console.log('✅ Company already exists. ID:', companyId);
+    } else {
+      // Create company
+      console.log('🆕 Creating new company...');
+      companyId = await callOdoo('res.partner', 'create', [
+        [{
+          name: leadData.companyName,
+          is_company: true,
+          customer_rank: 1,
+          user_id: salespersonId,
+          website: leadData.website || '',
+          street: leadData.street || '',
+          comment: `Company created via LinkedIn import for ${leadData.name}`
+        }]
+      ]);
+      clientType = 'New Prospect';
+      console.log('✅ Company created. ID:', companyId);
+    }
+
+    // Step 4: Check if individual contact exists
+    console.log('👤 Checking individual contact:', leadData.name);
+    
+    const existingContacts = await callOdoo('res.partner', 'search_read', [
+      [['name', '=', leadData.name], ['parent_id', '=', companyId]],
+      ['id', 'name', 'email']
+    ]);
+
+    let contactId;
+    let contactAlreadyExists = false;
+
+    if (existingContacts && existingContacts.length > 0) {
+      contactId = existingContacts[0].id;
+      contactAlreadyExists = true;
+      console.log('✅ Contact already exists. ID:', contactId);
+    } else {
+      // Create individual contact
+      console.log('🆕 Creating individual contact...');
+      contactId = await callOdoo('res.partner', 'create', [
+        [{
+          name: leadData.name,
+          parent_id: companyId,
+          type: 'contact',
+          email: leadData.email || '',
+          phone: leadData.phone || '',
+          function: leadData.function || '',
+          website: leadData.website || '',
+          street: leadData.street || '',
+          is_company: false,
+          customer_rank: 1,
+          comment: leadData.comment || ''
+        }]
+      ]);
+      console.log('✅ Individual contact created. ID:', contactId);
+    }
+
+    // Step 5: Check if lead already exists for this contact
+    console.log('🎯 Checking for existing lead...');
+    
+    const existingLeads = await callOdoo('crm.lead', 'search_read', [
+      [['partner_id', '=', contactId]],
+      ['id', 'name']
+    ]);
+
+    let leadId;
+    let leadAlreadyExists = false;
+
+    if (existingLeads && existingLeads.length > 0) {
+      leadId = existingLeads[0].id;
+      leadAlreadyExists = true;
+      console.log('✅ Lead already exists. ID:', leadId);
+      
+      // Return message about existing lead
+      await exportLogs.insertOne({
+        leadName: leadData.name,
+        leadEmail: leadData.email,
+        linkedinUrl: linkedinUrl,
+        crmType: 'odoo',
+        crmId: leadId,
+        exportedBy: userEmail,
+        exportedAt: new Date(),
+        status: 'success',
+        message: 'Lead already exists in CRM',
+        companyId: companyId,
+        contactId: contactId
+      });
+
+      return res.json({
+        success: true,
+        message: `Lead already exists in Odoo CRM. ${isExistingCompany ? 'Company and contact were found.' : 'New company was created.'}`,
+        crmId: leadId,
+        crmType: 'odoo',
+        details: {
+          companyCreated: !isExistingCompany,
+          contactCreated: !contactAlreadyExists,
+          leadCreated: false,
+          clientType: clientType
         }
+      });
+    }
 
-        const createResult = await createResponse.json();
-        
-        if (createResult.error) {
-          console.error('Odoo API error:', createResult.error);
-          throw new Error(createResult.error.data?.message || 'Odoo API error');
-        }
+    // Step 6: Create lead with Client Type
+    console.log('🆕 Creating new lead with Client Type:', clientType);
+    
+    leadId = await callOdoo('crm.lead', 'create', [
+      [{
+        name: `${leadData.name} - LinkedIn Opportunity`,
+        partner_id: contactId,
+        partner_name: leadData.name,
+        email_from: leadData.email || '',
+        phone: leadData.phone || '',
+        function: leadData.function || '',
+        website: leadData.website || '',
+        street: leadData.street || '',
+        description: leadData.comment || `Sourced from LinkedIn: ${leadData.website || ''}`,
+        type: 'opportunity',
+        user_id: salespersonId,
+        x_studio_client_type: clientType  // Custom field for Client Type
+      }]
+    ]);
 
-        const contactId = createResult.result;
-        console.log('✅ Contact created. ID:', contactId);
+    console.log('✅ Lead created successfully. ID:', leadId);
 
-        // Log to database
-        try {
-          await exportLogs.insertOne({
-            leadName: leadData.name,
-            leadEmail: leadData.email,
-            linkedinUrl: linkedinUrl,
-            crmType: 'odoo',
-            crmId: contactId,
-            exportedBy: userEmail,
-            exportedAt: new Date(),
-            status: 'success',
-            odooUserId: userId
-          });
-        } catch (logError) {
-          console.warn('Failed to log:', logError.message);
-        }
+    // Log to database
+    await exportLogs.insertOne({
+      leadName: leadData.name,
+      leadEmail: leadData.email,
+      linkedinUrl: linkedinUrl,
+      crmType: 'odoo',
+      crmId: leadId,
+      companyId: companyId,
+      contactId: contactId,
+      exportedBy: userEmail,
+      exportedAt: new Date(),
+      status: 'success',
+      clientType: clientType,
+      salespersonId: salespersonId
+    });
 
-        res.json({
-          success: true,
-          message: 'Lead exported to Odoo successfully',
-          crmId: contactId,
-          crmType: 'odoo'
-        });
-
-      } catch (error) {
-        console.error('Odoo export error:', error);
-        
-        try {
-          await exportLogs.insertOne({
-            leadName: req.body.leadData?.name,
-            linkedinUrl: req.body.linkedinUrl,
-            crmType: 'odoo',
-            exportedBy: req.body.userEmail,
-            exportedAt: new Date(),
-            status: 'failed',
-            errorMessage: error.message
-          });
-        } catch (logError) {
-          console.warn('Failed to log error:', logError.message);
-        }
-
-        res.status(500).json({
-          success: false,
-          error: error.message || 'Failed to export to Odoo CRM'
-        });
+    res.json({
+      success: true,
+      message: `Successfully exported to Odoo CRM as ${clientType}`,
+      crmId: leadId,
+      crmType: 'odoo',
+      details: {
+        companyCreated: !isExistingCompany,
+        contactCreated: !contactAlreadyExists,
+        leadCreated: true,
+        clientType: clientType,
+        companyId: companyId,
+        contactId: contactId
       }
     });
 
-    // Check if already exported
-    app.get('/api/crm/check-export', async (req, res) => {
-      try {
-        const { url, userEmail } = req.query;
+  } catch (error) {
+    console.error('❌ Odoo export error:', error);
+    
+    await exportLogs.insertOne({
+      leadName: req.body.leadData?.name,
+      linkedinUrl: req.body.linkedinUrl,
+      crmType: 'odoo',
+      exportedBy: req.body.userEmail,
+      exportedAt: new Date(),
+      status: 'failed',
+      errorMessage: error.message
+    }).catch(() => {});
 
-        if (!url || !userEmail) {
-          return res.status(400).json({ 
-            error: 'URL and userEmail required',
-            alreadyExported: false 
-          });
-        }
-
-        const existingExport = await exportLogs.findOne({
-          linkedinUrl: url,
-          exportedBy: userEmail,
-          status: 'success',
-          crmType: 'odoo'
-        });
-
-        if (existingExport) {
-          return res.json({
-            alreadyExported: true,
-            exportedAt: existingExport.exportedAt,
-            crmId: existingExport.crmId,
-            crmType: existingExport.crmType
-          });
-        }
-
-        res.json({ alreadyExported: false });
-
-      } catch (error) {
-        console.error('Export check error:', error);
-        res.status(200).json({
-          alreadyExported: false,
-          error: error.message
-        });
-      }
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to export to Odoo CRM'
     });
-
-    console.log('✅ Odoo CRM endpoints registered');
-
-    app.listen(3000, () => {
-      console.log('🚀 Server running on http://localhost:3000');
-    });
-
-  } catch (err) {
-    console.error('❌ MongoDB connection failed:', err.message);
   }
-}
+});
 
 startServer();
