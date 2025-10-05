@@ -107,44 +107,55 @@ async function startServer() {
       }
     });
 
-    // ========== ODOO CRM EXPORT - COMPLETE WORKFLOW WITH VALIDATION ==========
-app.post('/api/crm/export-odoo', async (req, res) => {
-  try {
-    const { leadData, crmConfig, userEmail, linkedinUrl } = req.body;
+    // ========== ODOO CRM EXPORT - COMPLETE WITH COMMENT EXTRACTION ==========
 
-    // ADD THIS DEBUG LOGGING
-    console.log('==================== DEBUG START ====================');
-    console.log('Full request body:', JSON.stringify(req.body, null, 2));
-    console.log('leadData object:', leadData);
-    console.log('leadData.name:', leadData?.name);
-    console.log('leadData.companyName:', leadData?.companyName);
-    console.log('leadData.company:', leadData?.company);
-    console.log('==================== DEBUG END ====================');
+    app.post('/api/crm/export-odoo', async (req, res) => {
+      try {
+        const { leadData, crmConfig, userEmail, linkedinUrl } = req.body;
 
-    // Enhanced validation
-    if (!leadData || !leadData.name) {
-      return res.status(400).json({ error: 'Lead data with name is required' });
-    }
+        // Enhanced validation
+        if (!leadData || !leadData.name) {
+          return res.status(400).json({ error: 'Lead data with name is required' });
+        }
 
-    // Validate name length
-    const cleanName = (leadData.name || '').trim();
-    if (cleanName.length < 2) {
-      return res.status(400).json({ 
-        error: 'Invalid name. Name must be at least 2 characters.',
-        receivedName: leadData.name 
-      });
-    }
+        // Validate name
+        const cleanName = (leadData.name || '').trim();
+        if (cleanName.length < 2) {
+          return res.status(400).json({ 
+            error: 'Invalid name. Name must be at least 2 characters.',
+            receivedName: leadData.name 
+          });
+        }
 
-    // FIX: Check both companyName and company fields
-    const cleanCompany = (leadData.companyName || leadData.company || '').trim();
-    if (!cleanCompany || cleanCompany.length < 2) {
-      return res.status(400).json({ 
-        error: 'Invalid company name. Company name must be at least 2 characters.',
-        receivedCompany: leadData.companyName,
-        receivedCompanyAlt: leadData.company,
-        allLeadDataKeys: Object.keys(leadData)
-      });
-    }
+        // EXTRACT COMPANY NAME - check multiple sources
+        let cleanCompany = (leadData.companyName || leadData.company || '').trim();
+        
+        // If not found, extract from comment field
+        if (!cleanCompany && leadData.comment) {
+          const commentMatch = leadData.comment.match(/Company:\s*(.+)/);
+          if (commentMatch && commentMatch[1]) {
+            cleanCompany = commentMatch[1].split('\n')[0].trim();
+            console.log('Extracted company from comment:', cleanCompany);
+          }
+        }
+
+        // Extract sourcedBy from comment if not provided
+        let sourcedBy = leadData.sourcedBy;
+        if (!sourcedBy && leadData.comment) {
+          const sourcedByMatch = leadData.comment.match(/Sourced by:\s*(.+)/);
+          if (sourcedByMatch && sourcedByMatch[1]) {
+            sourcedBy = sourcedByMatch[1].split('\n')[0].trim();
+            console.log('Extracted sourcedBy from comment:', sourcedBy);
+          }
+        }
+
+        if (!cleanCompany || cleanCompany.length < 2) {
+          return res.status(400).json({ 
+            error: 'Invalid company name. Company name must be at least 2 characters.',
+            receivedCompany: leadData.companyName,
+            extractedFromComment: cleanCompany
+          });
+        }
 
         if (!crmConfig || !crmConfig.endpointUrl || !crmConfig.username || !crmConfig.password) {
           return res.status(400).json({ error: 'CRM configuration is incomplete' });
@@ -153,7 +164,7 @@ app.post('/api/crm/export-odoo', async (req, res) => {
         console.log('Odoo CRM export:', {
           lead: cleanName,
           company: cleanCompany,
-          sourcedBy: leadData.sourcedBy
+          sourcedBy: sourcedBy
         });
 
         // Check if already exported
@@ -175,7 +186,7 @@ app.post('/api/crm/export-odoo', async (req, res) => {
           });
         }
 
-        // Step 1: Authenticate
+        // Authentication
         console.log('Authenticating...');
         const authUrl = `${crmConfig.endpointUrl}/web/session/authenticate`;
         const authResponse = await fetch(authUrl, {
@@ -214,7 +225,7 @@ app.post('/api/crm/export-odoo', async (req, res) => {
 
         const odooUrl = `${crmConfig.endpointUrl}/jsonrpc`;
 
-        // Helper function to call Odoo
+        // Helper function
         async function callOdoo(model, method, args) {
           const response = await fetch(odooUrl, {
             method: 'POST',
@@ -247,9 +258,8 @@ app.post('/api/crm/export-odoo', async (req, res) => {
           return result.result;
         }
 
-        // Step 2: Get LinkedIn source ID
+        // Get LinkedIn source
         console.log('Finding LinkedIn source...');
-        
         let linkedinSourceId = null;
         const sources = await callOdoo('utm.source', 'search_read', [
           [['name', '=', 'LinkedIn']],
@@ -267,13 +277,12 @@ app.post('/api/crm/export-odoo', async (req, res) => {
           console.log('LinkedIn source created. ID:', linkedinSourceId);
         }
 
-        // Step 3: Find salesperson
-        console.log('Finding salesperson:', leadData.sourcedBy);
-        
+        // Find salesperson
+        console.log('Finding salesperson:', sourcedBy);
         let salespersonId = null;
-        if (leadData.sourcedBy) {
+        if (sourcedBy) {
           const salespersons = await callOdoo('res.users', 'search_read', [
-            [['name', 'ilike', leadData.sourcedBy]],
+            [['name', 'ilike', sourcedBy]],
             ['id', 'name']
           ]);
           
@@ -288,12 +297,11 @@ app.post('/api/crm/export-odoo', async (req, res) => {
           salespersonId = userId;
         }
 
-        // Step 4: Check if company exists
+        // Check company
         console.log('Checking company:', cleanCompany);
-        
         const existingCompanies = await callOdoo('res.partner', 'search_read', [
           [['name', '=', cleanCompany], ['is_company', '=', true]],
-          ['id', 'name', 'user_id']
+          ['id', 'name']
         ]);
 
         let companyId;
@@ -315,16 +323,15 @@ app.post('/api/crm/export-odoo', async (req, res) => {
               user_id: salespersonId,
               website: (leadData.website || '').trim() || false,
               street: (leadData.street || '').trim() || false,
-              comment: `Company created via LinkedIn import for ${cleanName}`
+              comment: `Company created via LinkedIn import`
             }]
           ]);
           clientType = 'New Prospect';
           console.log('Company created. ID:', companyId);
         }
 
-        // Step 5: Check if individual contact exists
+        // Check contact
         console.log('Checking contact:', cleanName);
-        
         const existingContacts = await callOdoo('res.partner', 'search_read', [
           [['name', '=', cleanName], ['parent_id', '=', companyId]],
           ['id', 'name', 'email']
@@ -340,7 +347,6 @@ app.post('/api/crm/export-odoo', async (req, res) => {
         } else {
           console.log('Creating contact...');
           
-          // Prepare contact data with proper validation
           const contactData = {
             name: cleanName,
             parent_id: companyId,
@@ -349,9 +355,8 @@ app.post('/api/crm/export-odoo', async (req, res) => {
             customer_rank: 1
           };
 
-          // Only add fields if they have valid values
           const email = (leadData.email || '').trim();
-          if (email && isValidEmail(email)) {
+          if (email && isValidEmail(email) && email !== 'No email found') {
             contactData.email = email;
           }
 
@@ -388,9 +393,8 @@ app.post('/api/crm/export-odoo', async (req, res) => {
           console.log('Contact created. ID:', contactId);
         }
 
-        // Step 6: Check if lead exists
+        // Check for existing lead
         console.log('Checking for existing lead...');
-        
         const existingLeads = await callOdoo('crm.lead', 'search_read', [
           [['partner_id', '=', contactId]],
           ['id', 'name']
@@ -430,7 +434,7 @@ app.post('/api/crm/export-odoo', async (req, res) => {
           });
         }
 
-        // Step 7: Create lead
+        // Create lead
         console.log('Creating lead with Client Type:', clientType);
         
         const leadCreateData = {
@@ -443,9 +447,8 @@ app.post('/api/crm/export-odoo', async (req, res) => {
           x_studio_client_type: clientType
         };
 
-        // Add optional fields
         const emailFrom = (leadData.email || '').trim();
-        if (emailFrom && isValidEmail(emailFrom)) {
+        if (emailFrom && isValidEmail(emailFrom) && emailFrom !== 'No email found') {
           leadCreateData.email_from = emailFrom;
         }
 
@@ -536,7 +539,7 @@ app.post('/api/crm/export-odoo', async (req, res) => {
       }
     });
 
-    // Check if lead was already exported
+    // Check if already exported
     app.get('/api/crm/check-export', async (req, res) => {
       try {
         const { url, userEmail } = req.query;
