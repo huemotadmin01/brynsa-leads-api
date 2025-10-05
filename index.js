@@ -108,33 +108,43 @@ async function startServer() {
     });
 
     // ========== ODOO CRM EXPORT - COMPLETE WORKFLOW WITH VALIDATION ==========
+app.post('/api/crm/export-odoo', async (req, res) => {
+  try {
+    const { leadData, crmConfig, userEmail, linkedinUrl } = req.body;
 
-    app.post('/api/crm/export-odoo', async (req, res) => {
-      try {
-        const { leadData, crmConfig, userEmail, linkedinUrl } = req.body;
+    // ADD THIS DEBUG LOGGING
+    console.log('==================== DEBUG START ====================');
+    console.log('Full request body:', JSON.stringify(req.body, null, 2));
+    console.log('leadData object:', leadData);
+    console.log('leadData.name:', leadData?.name);
+    console.log('leadData.companyName:', leadData?.companyName);
+    console.log('leadData.company:', leadData?.company);
+    console.log('==================== DEBUG END ====================');
 
-        // Enhanced validation
-        if (!leadData || !leadData.name) {
-          return res.status(400).json({ error: 'Lead data with name is required' });
-        }
+    // Enhanced validation
+    if (!leadData || !leadData.name) {
+      return res.status(400).json({ error: 'Lead data with name is required' });
+    }
 
-        // Validate name length
-        const cleanName = (leadData.name || '').trim();
-        if (cleanName.length < 2) {
-          return res.status(400).json({ 
-            error: 'Invalid name. Name must be at least 2 characters.',
-            receivedName: leadData.name 
-          });
-        }
+    // Validate name length
+    const cleanName = (leadData.name || '').trim();
+    if (cleanName.length < 2) {
+      return res.status(400).json({ 
+        error: 'Invalid name. Name must be at least 2 characters.',
+        receivedName: leadData.name 
+      });
+    }
 
-        // Validate company name
-        const cleanCompany = (leadData.companyName || '').trim();
-        if (!cleanCompany || cleanCompany.length < 2) {
-          return res.status(400).json({ 
-            error: 'Invalid company name. Company name must be at least 2 characters.',
-            receivedCompany: leadData.companyName 
-          });
-        }
+    // FIX: Check both companyName and company fields
+    const cleanCompany = (leadData.companyName || leadData.company || '').trim();
+    if (!cleanCompany || cleanCompany.length < 2) {
+      return res.status(400).json({ 
+        error: 'Invalid company name. Company name must be at least 2 characters.',
+        receivedCompany: leadData.companyName,
+        receivedCompanyAlt: leadData.company,
+        allLeadDataKeys: Object.keys(leadData)
+      });
+    }
 
         if (!crmConfig || !crmConfig.endpointUrl || !crmConfig.username || !crmConfig.password) {
           return res.status(400).json({ error: 'CRM configuration is incomplete' });
