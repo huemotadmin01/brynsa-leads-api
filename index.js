@@ -107,23 +107,42 @@ async function startServer() {
       }
     });
 
-    // ========== ODOO CRM EXPORT - COMPLETE WORKFLOW ==========
+    // ========== ODOO CRM EXPORT - COMPLETE WORKFLOW WITH VALIDATION ==========
 
     app.post('/api/crm/export-odoo', async (req, res) => {
       try {
         const { leadData, crmConfig, userEmail, linkedinUrl } = req.body;
 
+        // Enhanced validation
         if (!leadData || !leadData.name) {
           return res.status(400).json({ error: 'Lead data with name is required' });
+        }
+
+        // Validate name length
+        const cleanName = (leadData.name || '').trim();
+        if (cleanName.length < 2) {
+          return res.status(400).json({ 
+            error: 'Invalid name. Name must be at least 2 characters.',
+            receivedName: leadData.name 
+          });
+        }
+
+        // Validate company name
+        const cleanCompany = (leadData.companyName || '').trim();
+        if (!cleanCompany || cleanCompany.length < 2) {
+          return res.status(400).json({ 
+            error: 'Invalid company name. Company name must be at least 2 characters.',
+            receivedCompany: leadData.companyName 
+          });
         }
 
         if (!crmConfig || !crmConfig.endpointUrl || !crmConfig.username || !crmConfig.password) {
           return res.status(400).json({ error: 'CRM configuration is incomplete' });
         }
 
-        console.log('📤 Odoo CRM export - Multi-step process:', {
-          lead: leadData.name,
-          company: leadData.companyName || 'N/A',
+        console.log('Odoo CRM export:', {
+          lead: cleanName,
+          company: cleanCompany,
           sourcedBy: leadData.sourcedBy
         });
 
@@ -147,7 +166,7 @@ async function startServer() {
         }
 
         // Step 1: Authenticate
-        console.log('🔐 Authenticating...');
+        console.log('Authenticating...');
         const authUrl = `${crmConfig.endpointUrl}/web/session/authenticate`;
         const authResponse = await fetch(authUrl, {
           method: 'POST',
@@ -181,7 +200,7 @@ async function startServer() {
         const sessionId = authResult.result.session_id;
         if (!cookies && sessionId) cookies = `session_id=${sessionId}`;
 
-        console.log('✅ Authenticated. User ID:', userId);
+        console.log('Authenticated. User ID:', userId);
 
         const odooUrl = `${crmConfig.endpointUrl}/jsonrpc`;
 
@@ -211,6 +230,7 @@ async function startServer() {
 
           const result = await response.json();
           if (result.error) {
+            console.error('Odoo API Error:', result.error);
             throw new Error(result.error.data?.message || result.error.message || 'Odoo API error');
           }
 
@@ -218,7 +238,7 @@ async function startServer() {
         }
 
         // Step 2: Get LinkedIn source ID
-        console.log('🔍 Finding LinkedIn source...');
+        console.log('Finding LinkedIn source...');
         
         let linkedinSourceId = null;
         const sources = await callOdoo('utm.source', 'search_read', [
@@ -228,17 +248,17 @@ async function startServer() {
         
         if (sources && sources.length > 0) {
           linkedinSourceId = sources[0].id;
-          console.log('✅ LinkedIn source ID:', linkedinSourceId);
+          console.log('LinkedIn source ID:', linkedinSourceId);
         } else {
-          console.log('🆕 Creating LinkedIn source...');
+          console.log('Creating LinkedIn source...');
           linkedinSourceId = await callOdoo('utm.source', 'create', [
             [{ name: 'LinkedIn' }]
           ]);
-          console.log('✅ LinkedIn source created. ID:', linkedinSourceId);
+          console.log('LinkedIn source created. ID:', linkedinSourceId);
         }
 
-        // Step 3: Find or get salesperson ID by sourcedBy name
-        console.log('👤 Finding salesperson:', leadData.sourcedBy);
+        // Step 3: Find salesperson
+        console.log('Finding salesperson:', leadData.sourcedBy);
         
         let salespersonId = null;
         if (leadData.sourcedBy) {
@@ -249,9 +269,9 @@ async function startServer() {
           
           if (salespersons && salespersons.length > 0) {
             salespersonId = salespersons[0].id;
-            console.log('✅ Found salesperson ID:', salespersonId);
+            console.log('Found salesperson ID:', salespersonId);
           } else {
-            console.log('⚠️ Salesperson not found, using current user');
+            console.log('Salesperson not found, using current user');
             salespersonId = userId;
           }
         } else {
@@ -259,10 +279,10 @@ async function startServer() {
         }
 
         // Step 4: Check if company exists
-        console.log('🏢 Checking company:', leadData.companyName);
+        console.log('Checking company:', cleanCompany);
         
         const existingCompanies = await callOdoo('res.partner', 'search_read', [
-          [['name', '=', leadData.companyName], ['is_company', '=', true]],
+          [['name', '=', cleanCompany], ['is_company', '=', true]],
           ['id', 'name', 'user_id']
         ]);
 
@@ -274,29 +294,29 @@ async function startServer() {
           companyId = existingCompanies[0].id;
           isExistingCompany = true;
           clientType = 'Existing Client';
-          console.log('✅ Company already exists. ID:', companyId);
+          console.log('Company exists. ID:', companyId);
         } else {
-          console.log('🆕 Creating new company...');
+          console.log('Creating company...');
           companyId = await callOdoo('res.partner', 'create', [
             [{
-              name: leadData.companyName,
+              name: cleanCompany,
               is_company: true,
               customer_rank: 1,
               user_id: salespersonId,
-              website: leadData.website || '',
-              street: leadData.street || '',
-              comment: `Company created via LinkedIn import for ${leadData.name}`
+              website: (leadData.website || '').trim() || false,
+              street: (leadData.street || '').trim() || false,
+              comment: `Company created via LinkedIn import for ${cleanName}`
             }]
           ]);
           clientType = 'New Prospect';
-          console.log('✅ Company created. ID:', companyId);
+          console.log('Company created. ID:', companyId);
         }
 
         // Step 5: Check if individual contact exists
-        console.log('👤 Checking individual contact:', leadData.name);
+        console.log('Checking contact:', cleanName);
         
         const existingContacts = await callOdoo('res.partner', 'search_read', [
-          [['name', '=', leadData.name], ['parent_id', '=', companyId]],
+          [['name', '=', cleanName], ['parent_id', '=', companyId]],
           ['id', 'name', 'email']
         ]);
 
@@ -306,29 +326,60 @@ async function startServer() {
         if (existingContacts && existingContacts.length > 0) {
           contactId = existingContacts[0].id;
           contactAlreadyExists = true;
-          console.log('✅ Contact already exists. ID:', contactId);
+          console.log('Contact exists. ID:', contactId);
         } else {
-          console.log('🆕 Creating individual contact...');
+          console.log('Creating contact...');
+          
+          // Prepare contact data with proper validation
+          const contactData = {
+            name: cleanName,
+            parent_id: companyId,
+            type: 'contact',
+            is_company: false,
+            customer_rank: 1
+          };
+
+          // Only add fields if they have valid values
+          const email = (leadData.email || '').trim();
+          if (email && isValidEmail(email)) {
+            contactData.email = email;
+          }
+
+          const phone = (leadData.phone || '').trim();
+          if (phone) {
+            contactData.phone = phone;
+          }
+
+          const func = (leadData.function || '').trim();
+          if (func) {
+            contactData.function = func;
+          }
+
+          const website = (leadData.website || '').trim();
+          if (website) {
+            contactData.website = website;
+          }
+
+          const street = (leadData.street || '').trim();
+          if (street) {
+            contactData.street = street;
+          }
+
+          const comment = (leadData.comment || '').trim();
+          if (comment) {
+            contactData.comment = comment;
+          }
+
+          console.log('Contact data:', contactData);
+          
           contactId = await callOdoo('res.partner', 'create', [
-            [{
-              name: leadData.name,
-              parent_id: companyId,
-              type: 'contact',
-              email: leadData.email || '',
-              phone: leadData.phone || '',
-              function: leadData.function || '',
-              website: leadData.website || '',
-              street: leadData.street || '',
-              is_company: false,
-              customer_rank: 1,
-              comment: leadData.comment || ''
-            }]
+            [contactData]
           ]);
-          console.log('✅ Individual contact created. ID:', contactId);
+          console.log('Contact created. ID:', contactId);
         }
 
-        // Step 6: Check if lead already exists for this contact
-        console.log('🎯 Checking for existing lead...');
+        // Step 6: Check if lead exists
+        console.log('Checking for existing lead...');
         
         const existingLeads = await callOdoo('crm.lead', 'search_read', [
           [['partner_id', '=', contactId]],
@@ -336,15 +387,13 @@ async function startServer() {
         ]);
 
         let leadId;
-        let leadAlreadyExists = false;
 
         if (existingLeads && existingLeads.length > 0) {
           leadId = existingLeads[0].id;
-          leadAlreadyExists = true;
-          console.log('✅ Lead already exists. ID:', leadId);
+          console.log('Lead exists. ID:', leadId);
           
           await exportLogs.insertOne({
-            leadName: leadData.name,
+            leadName: cleanName,
             leadEmail: leadData.email,
             linkedinUrl: linkedinUrl,
             crmType: 'odoo',
@@ -352,7 +401,7 @@ async function startServer() {
             exportedBy: userEmail,
             exportedAt: new Date(),
             status: 'success',
-            message: 'Lead already exists in CRM',
+            message: 'Lead already exists',
             companyId: companyId,
             contactId: contactId
           });
@@ -371,32 +420,61 @@ async function startServer() {
           });
         }
 
-        // Step 7: Create lead with Client Type and LinkedIn source
-        console.log('🆕 Creating new lead with Client Type:', clientType);
+        // Step 7: Create lead
+        console.log('Creating lead with Client Type:', clientType);
         
+        const leadCreateData = {
+          name: `${cleanName} - LinkedIn Opportunity`,
+          partner_id: contactId,
+          partner_name: cleanName,
+          type: 'opportunity',
+          user_id: salespersonId,
+          source_id: linkedinSourceId,
+          x_studio_client_type: clientType
+        };
+
+        // Add optional fields
+        const emailFrom = (leadData.email || '').trim();
+        if (emailFrom && isValidEmail(emailFrom)) {
+          leadCreateData.email_from = emailFrom;
+        }
+
+        const phone = (leadData.phone || '').trim();
+        if (phone) {
+          leadCreateData.phone = phone;
+        }
+
+        const func = (leadData.function || '').trim();
+        if (func) {
+          leadCreateData.function = func;
+        }
+
+        const website = (leadData.website || '').trim();
+        if (website) {
+          leadCreateData.website = website;
+        }
+
+        const street = (leadData.street || '').trim();
+        if (street) {
+          leadCreateData.street = street;
+        }
+
+        const description = (leadData.comment || '').trim() || `Sourced from LinkedIn: ${website || ''}`;
+        if (description) {
+          leadCreateData.description = description;
+        }
+
+        console.log('Lead data:', leadCreateData);
+
         leadId = await callOdoo('crm.lead', 'create', [
-          [{
-            name: `${leadData.name} - LinkedIn Opportunity`,
-            partner_id: contactId,
-            partner_name: leadData.name,
-            email_from: leadData.email || '',
-            phone: leadData.phone || '',
-            function: leadData.function || '',
-            website: leadData.website || '',
-            street: leadData.street || '',
-            description: leadData.comment || `Sourced from LinkedIn: ${leadData.website || ''}`,
-            type: 'opportunity',
-            user_id: salespersonId,
-            source_id: linkedinSourceId,
-            x_studio_client_type: clientType
-          }]
+          [leadCreateData]
         ]);
 
-        console.log('✅ Lead created successfully. ID:', leadId);
+        console.log('Lead created. ID:', leadId);
 
         // Log to database
         await exportLogs.insertOne({
-          leadName: leadData.name,
+          leadName: cleanName,
           leadEmail: leadData.email,
           linkedinUrl: linkedinUrl,
           crmType: 'odoo',
@@ -428,7 +506,7 @@ async function startServer() {
         });
 
       } catch (error) {
-        console.error('❌ Odoo export error:', error);
+        console.error('Odoo export error:', error);
         
         await exportLogs.insertOne({
           leadName: req.body.leadData?.name,
@@ -437,7 +515,8 @@ async function startServer() {
           exportedBy: req.body.userEmail,
           exportedAt: new Date(),
           status: 'failed',
-          errorMessage: error.message
+          errorMessage: error.message,
+          errorStack: error.stack
         }).catch(() => {});
 
         res.status(500).json({
@@ -478,7 +557,7 @@ async function startServer() {
         res.json({ alreadyExported: false });
 
       } catch (error) {
-        console.error('❌ Export check error:', error);
+        console.error('Export check error:', error);
         res.status(200).json({
           alreadyExported: false,
           error: error.message
