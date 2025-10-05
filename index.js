@@ -343,11 +343,6 @@ async function startServer() {
           const func = (leadData.function || '').trim();
           if (func) contactData.function = func;
 
-          const linkedinProfileUrl = (leadData.website || '').trim();
-          if (linkedinProfileUrl && linkedinProfileUrl.includes('linkedin.com/in/')) {
-            contactData.website = linkedinProfileUrl;
-          }
-
           const street = (leadData.street || '').trim();
           if (street) contactData.street = street;
 
@@ -407,7 +402,7 @@ async function startServer() {
         const leadCreateData = {
           name: `${cleanName} - LinkedIn Opportunity`,
           partner_id: parseInt(contactId, 10),
-          partner_name: cleanName,
+          contact_name: cleanName,
           type: 'opportunity',
           user_id: salespersonId,
           source_id: linkedinSourceId,
@@ -424,11 +419,6 @@ async function startServer() {
 
         const func = (leadData.function || '').trim();
         if (func) leadCreateData.function = func;
-
-        const linkedinProfileUrl = (leadData.website || '').trim();
-        if (linkedinProfileUrl && linkedinProfileUrl.includes('linkedin.com/in/')) {
-          leadCreateData.website = linkedinProfileUrl;
-        }
 
         const street = (leadData.street || '').trim();
         if (street) leadCreateData.street = street;
