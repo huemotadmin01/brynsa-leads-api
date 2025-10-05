@@ -259,3 +259,106 @@ async function startServer() {
 
         const contactId = createResult.result;
         console.log('✅ Odoo contact created successfully. ID:', contactId);
+
+        // Log export to database
+        try {
+          await exportLogs.insertOne({
+            leadName: leadData.name,
+            leadEmail: leadData.email,
+            linkedinUrl: linkedinUrl,
+            crmType: 'odoo',
+            crmId: contactId,
+            exportedBy: userEmail,
+            exportedAt: new Date(),
+            status: 'success',
+            odooUserId: userId
+          });
+          console.log('📝 Export logged to database');
+        } catch (logError) {
+          console.warn('⚠️ Failed to log export:', logError.message);
+        }
+
+        res.json({
+          success: true,
+          message: 'Lead exported to Odoo successfully',
+          crmId: contactId,
+          crmType: 'odoo'
+        });
+
+      } catch (error) {
+        console.error('❌ Odoo export error:', error);
+        
+        // Log failed export
+        try {
+          await exportLogs.insertOne({
+            leadName: req.body.leadData?.name,
+            linkedinUrl: req.body.linkedinUrl,
+            crmType: 'odoo',
+            exportedBy: req.body.userEmail,
+            exportedAt: new Date(),
+            status: 'failed',
+            errorMessage: error.message,
+            errorStack: error.stack
+          });
+        } catch (logError) {
+          console.warn('⚠️ Failed to log error:', logError.message);
+        }
+
+        res.status(500).json({
+          success: false,
+          error: error.message || 'Failed to export to Odoo CRM'
+        });
+      }
+    });
+
+    // Check if lead was already exported
+    app.get('/api/crm/check-export', async (req, res) => {
+      try {
+        const { url, userEmail } = req.query;
+
+        if (!url || !userEmail) {
+          return res.status(400).json({ 
+            error: 'URL and userEmail are required',
+            alreadyExported: false 
+          });
+        }
+
+        const existingExport = await exportLogs.findOne({
+          linkedinUrl: url,
+          exportedBy: userEmail,
+          status: 'success',
+          crmType: 'odoo'
+        });
+
+        if (existingExport) {
+          return res.json({
+            alreadyExported: true,
+            exportedAt: existingExport.exportedAt,
+            crmId: existingExport.crmId,
+            crmType: existingExport.crmType
+          });
+        }
+
+        res.json({ alreadyExported: false });
+
+      } catch (error) {
+        console.error('❌ Export check error:', error);
+        res.status(200).json({
+          alreadyExported: false,
+          error: error.message
+        });
+      }
+    });
+
+    console.log('✅ Odoo CRM export endpoints registered');
+
+    app.listen(3000, () => {
+      console.log('🚀 Server is running on http://localhost:3000');
+    });
+
+  } catch (err) {
+    console.error('❌ MongoDB connection failed:', err.message);
+  }
+}
+
+startServer();
