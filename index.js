@@ -94,7 +94,6 @@ async function startServer() {
           return res.status(400).json({ success: false, message: 'Missing required fields' });
         }
 
-        // Check if lead already exists by LinkedIn URL
         const existing = await leads.findOne({ linkedinUrl: lead.linkedinUrl });
         if (existing) {
           return res.status(200).json({ message: 'Lead already exists', inserted: false });
@@ -108,9 +107,8 @@ async function startServer() {
       }
     });
 
-    // ========== ODOO CRM EXPORT ENDPOINTS (FIXED SESSION HANDLING) ==========
+    // ========== ODOO CRM EXPORT - CORRECTED ENDPOINT ==========
 
-    // Direct Odoo Export Endpoint using JSON-RPC with proper session handling
     app.post('/api/crm/export-odoo', async (req, res) => {
       try {
         const { leadData, crmConfig, userEmail, linkedinUrl } = req.body;
@@ -129,7 +127,7 @@ async function startServer() {
           endpoint: crmConfig.endpointUrl
         });
 
-        // Check if already exported to avoid duplicates
+        // Check if already exported
         const existingExport = await exportLogs.findOne({
           linkedinUrl: linkedinUrl,
           exportedBy: userEmail,
@@ -149,7 +147,7 @@ async function startServer() {
           });
         }
 
-        // Step 1: Authenticate with Odoo
+        // Step 1: Authenticate
         console.log('🔐 Authenticating with Odoo...');
         
         const authUrl = `${crmConfig.endpointUrl}/web/session/authenticate`;
@@ -164,76 +162,69 @@ async function startServer() {
 
         const authResponse = await fetch(authUrl, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(authPayload)
         });
 
         if (!authResponse.ok) {
-          const errorText = await authResponse.text().catch(() => 'Unknown error');
-          console.error('❌ Odoo authentication failed:', errorText);
           throw new Error(`Odoo authentication failed: ${authResponse.status}`);
         }
 
-        // Extract cookies from auth response
         const setCookieHeader = authResponse.headers.get('set-cookie');
         let cookies = '';
         if (setCookieHeader) {
-          // Parse all cookies from the Set-Cookie header
-          const cookieArray = setCookieHeader.split(',').map(cookie => {
-            const parts = cookie.trim().split(';');
-            return parts[0]; // Get only the name=value part
-          });
+          const cookieArray = setCookieHeader.split(',').map(cookie => cookie.trim().split(';')[0]);
           cookies = cookieArray.join('; ');
         }
 
         const authResult = await authResponse.json();
         
         if (!authResult.result || authResult.result.uid === false) {
-          console.error('❌ Odoo authentication failed:', authResult);
           throw new Error('Invalid Odoo credentials');
         }
 
         const userId = authResult.result.uid;
         const sessionId = authResult.result.session_id;
         
-        // Construct cookie string
         if (!cookies && sessionId) {
           cookies = `session_id=${sessionId}`;
         }
         
-        console.log('✅ Authenticated successfully. User ID:', userId);
+        console.log('✅ Authenticated. User ID:', userId);
 
-        // Step 2: Create partner record using the same session
-        console.log('🔄 Creating contact in Odoo...');
+        // Step 2: Create contact - CORRECTED URL
+        console.log('🔄 Creating contact...');
 
-        const createUrl = `${crmConfig.endpointUrl}/web/dataset/call_kw/res.partner/create`;
+        const createUrl = `${crmConfig.endpointUrl}/jsonrpc`;
         const createPayload = {
           jsonrpc: "2.0",
           method: "call",
           params: {
-            args: [{
-              name: leadData.name,
-              email: leadData.email || '',
-              phone: leadData.phone || '',
-              function: leadData.function || '',
-              website: leadData.website || '',
-              street: leadData.street || '',
-              comment: leadData.comment || '',
-              is_company: false,
-              customer_rank: 1
-            }],
-            kwargs: {
-              context: {
-                lang: "en_US",
-                tz: false,
-                uid: userId
-              }
-            }
+            service: "object",
+            method: "execute_kw",
+            args: [
+              crmConfig.databaseName,
+              userId,
+              crmConfig.password,
+              "res.partner",
+              "create",
+              [{
+                name: leadData.name,
+                email: leadData.email || '',
+                phone: leadData.phone || '',
+                function: leadData.function || '',
+                website: leadData.website || '',
+                street: leadData.street || '',
+                comment: leadData.comment || '',
+                is_company: false,
+                customer_rank: 1
+              }]
+            ]
           },
           id: Date.now()
         };
+
+        console.log('Calling:', createUrl);
 
         const createResponse = await fetch(createUrl, {
           method: 'POST',
@@ -245,22 +236,22 @@ async function startServer() {
         });
 
         if (!createResponse.ok) {
-          const errorText = await createResponse.text().catch(() => 'Unknown error');
-          console.error('❌ Odoo contact creation failed:', errorText);
-          throw new Error(`Odoo contact creation failed: ${createResponse.status}`);
+          const errorText = await createResponse.text().catch(() => 'Unknown');
+          console.error('Contact creation failed:', errorText);
+          throw new Error(`Contact creation failed: ${createResponse.status}`);
         }
 
         const createResult = await createResponse.json();
         
         if (createResult.error) {
-          console.error('❌ Odoo API error:', createResult.error);
-          throw new Error(createResult.error.data?.message || createResult.error.message || 'Odoo API error');
+          console.error('Odoo API error:', createResult.error);
+          throw new Error(createResult.error.data?.message || 'Odoo API error');
         }
 
         const contactId = createResult.result;
-        console.log('✅ Odoo contact created successfully. ID:', contactId);
+        console.log('✅ Contact created. ID:', contactId);
 
-        // Log export to database
+        // Log to database
         try {
           await exportLogs.insertOne({
             leadName: leadData.name,
@@ -273,9 +264,8 @@ async function startServer() {
             status: 'success',
             odooUserId: userId
           });
-          console.log('📝 Export logged to database');
         } catch (logError) {
-          console.warn('⚠️ Failed to log export:', logError.message);
+          console.warn('Failed to log:', logError.message);
         }
 
         res.json({
@@ -286,9 +276,8 @@ async function startServer() {
         });
 
       } catch (error) {
-        console.error('❌ Odoo export error:', error);
+        console.error('Odoo export error:', error);
         
-        // Log failed export
         try {
           await exportLogs.insertOne({
             leadName: req.body.leadData?.name,
@@ -297,11 +286,10 @@ async function startServer() {
             exportedBy: req.body.userEmail,
             exportedAt: new Date(),
             status: 'failed',
-            errorMessage: error.message,
-            errorStack: error.stack
+            errorMessage: error.message
           });
         } catch (logError) {
-          console.warn('⚠️ Failed to log error:', logError.message);
+          console.warn('Failed to log error:', logError.message);
         }
 
         res.status(500).json({
@@ -311,14 +299,14 @@ async function startServer() {
       }
     });
 
-    // Check if lead was already exported
+    // Check if already exported
     app.get('/api/crm/check-export', async (req, res) => {
       try {
         const { url, userEmail } = req.query;
 
         if (!url || !userEmail) {
           return res.status(400).json({ 
-            error: 'URL and userEmail are required',
+            error: 'URL and userEmail required',
             alreadyExported: false 
           });
         }
@@ -342,7 +330,7 @@ async function startServer() {
         res.json({ alreadyExported: false });
 
       } catch (error) {
-        console.error('❌ Export check error:', error);
+        console.error('Export check error:', error);
         res.status(200).json({
           alreadyExported: false,
           error: error.message
@@ -350,10 +338,10 @@ async function startServer() {
       }
     });
 
-    console.log('✅ Odoo CRM export endpoints registered');
+    console.log('✅ Odoo CRM endpoints registered');
 
     app.listen(3000, () => {
-      console.log('🚀 Server is running on http://localhost:3000');
+      console.log('🚀 Server running on http://localhost:3000');
     });
 
   } catch (err) {
