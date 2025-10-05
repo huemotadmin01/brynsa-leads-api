@@ -400,7 +400,7 @@ async function startServer() {
 
         // Create lead
         const leadCreateData = {
-          name: `${cleanName} - LinkedIn Opportunity`,
+          name: `${cleanName}'s opportunity`,
           partner_id: parseInt(contactId, 10),
           contact_name: cleanName,
           type: 'opportunity',
