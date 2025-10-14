@@ -155,7 +155,7 @@ async function startServer() {
           return res.status(400).json({ error: 'CRM configuration is incomplete' });
         }
 
-        console.log('Odoo export:', { lead: cleanName, company: cleanCompany, sourcedBy });
+        console.log('Odoo export:', { lead: cleanName, company: cleanCompany, sourcedBy, linkedinUrl });
 
         // Check if already exported
         const existingExport = await exportLogs.findOne({
@@ -398,7 +398,7 @@ async function startServer() {
           });
         }
 
-        // Create lead
+        // Create lead/opportunity
         const leadCreateData = {
           name: `${cleanName}'s opportunity`,
           partner_id: parseInt(contactId, 10),
@@ -423,17 +423,23 @@ async function startServer() {
         const street = (leadData.street || '').trim();
         if (street) leadCreateData.street = street;
 
-        const description = (leadData.comment || '').trim() || `Sourced from LinkedIn`;
-        if (description) leadCreateData.description = description;
+        // ✅ UPDATED: Add LinkedIn URL to website field instead of description
+        if (linkedinUrl) {
+          leadCreateData.website = linkedinUrl;
+        }
 
-        console.log('Creating lead with data:', { clientType, isExistingCompany });
+        console.log('Creating opportunity with data:', { 
+          clientType, 
+          isExistingCompany, 
+          website: linkedinUrl 
+        });
 
         const leadResult = await callOdoo('crm.lead', 'create', [
           [leadCreateData]
         ]);
 
         leadId = Array.isArray(leadResult) ? leadResult[0] : leadResult;
-        console.log('Lead created. ID:', leadId);
+        console.log('Opportunity created. ID:', leadId);
 
         await exportLogs.insertOne({
           leadName: cleanName,
@@ -463,7 +469,8 @@ async function startServer() {
             clientType: clientType,
             source: 'LinkedIn',
             companyId: companyId,
-            contactId: contactId
+            contactId: contactId,
+            websiteUrl: linkedinUrl
           }
         });
 
