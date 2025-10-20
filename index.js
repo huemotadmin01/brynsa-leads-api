@@ -476,8 +476,6 @@ async function startServer() {
             email_from: emailToUse,
             partner_id: contactId,
             user_id: salespersonId, // ✅ This is the recruiter/sourced by user
-            // Note: hr.candidate doesn't have source_id field, only user_id for recruiter
-            description: `LinkedIn: ${linkedinUrl}\nSourced by: ${sourcedBy || 'Current User'}\nCompany: ${cleanCompany || 'Not specified'}\nMain Skill: ${mainSkill}`
           };
 
           // Create candidate first
