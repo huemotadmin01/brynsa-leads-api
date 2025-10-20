@@ -269,7 +269,7 @@ async function startServer() {
         // ========== ROUTE BASED ON PROFILE TYPE ==========
         
         if (profileType === 'candidate') {
-          // ✅ FIX 2: Extract main skill from job title or headline
+          // ✅ CANDIDATE CREATION WORKFLOW
           console.log('📋 Creating candidate record...');
           
           // Extract main skill intelligently
@@ -330,7 +330,7 @@ async function startServer() {
             }
           }
 
-          // ✅ FIX 3: Get IT skill type (already exists with 185 records)
+          // Get IT skill type (already exists with 185 records)
           console.log('🔍 Finding IT skill type...');
           const itSkillTypes = await callOdoo('hr.skill.type', 'search_read', [
             [['name', '=', 'IT']],
@@ -348,7 +348,7 @@ async function startServer() {
             console.log(`✓ Created IT skill type (ID: ${itSkillTypeId})`);
           }
 
-          // ✅ FIX 3: Check for duplicate skill by name (case-insensitive)
+          // Check for duplicate skill by name (case-insensitive)
           console.log(`🔍 Checking for existing skill: ${mainSkill}`);
           const existingSkills = await callOdoo('hr.skill', 'search_read', [
             [['name', 'ilike', mainSkill]],
@@ -360,17 +360,17 @@ async function startServer() {
             mainSkillId = existingSkills[0].id;
             console.log(`✓ Skill already exists: ${existingSkills[0].name} (ID: ${mainSkillId})`);
           } else {
-            // ✅ FIX 4: Create skill with correct API - use skill_type_id field
+            // Create skill with correct API - use skill_type_id field
             console.log(`✓ Creating new skill: ${mainSkill} with IT type (ID: ${itSkillTypeId})`);
             const skillResult = await callOdoo('hr.skill', 'create', [[{
               name: mainSkill,
-              skill_type_id: itSkillTypeId // ✅ Correct field name from Odoo model
+              skill_type_id: itSkillTypeId
             }]]);
             mainSkillId = Array.isArray(skillResult) ? skillResult[0] : skillResult;
             console.log(`✓ Skill created (ID: ${mainSkillId})`);
           }
 
-          // ✅ FIX 1: Check if candidate already exists (by name and main skill)
+          // Check if candidate already exists (by name and main skill)
           console.log(`🔍 Checking for existing candidate: ${cleanName} with skill ${mainSkill}`);
           
           // First check by name only
@@ -406,7 +406,7 @@ async function startServer() {
             }
           }
 
-          // ✅ FIX 1: If duplicate found, return "Already in CRM" message
+          // If duplicate found, return "Already in CRM" message
           if (candidateExists) {
             await exportLogs.insertOne({
               leadName: cleanName,
@@ -466,11 +466,8 @@ async function startServer() {
             console.log(`✓ Contact created (ID: ${contactId})`);
           }
 
-          // Note: hr.candidate model does not have source_id field
-          // LinkedIn source is tracked in description field instead
-
-          // ✅ FIX 4: Create candidate with skill using correct many2many syntax
-          console.log('✨ Creating candidate with skill...');
+          // ✅ FIX: Create candidate without description field (doesn't exist in hr.candidate)
+          console.log('✨ Creating candidate...');
           const candidateData = {
             partner_name: cleanName,
             email_from: emailToUse,
@@ -483,12 +480,35 @@ async function startServer() {
           const candidateId = Array.isArray(candidateResult) ? candidateResult[0] : candidateResult;
           console.log(`✓ Candidate created (ID: ${candidateId})`);
 
-          // ✅ FIX 4: Add skill to candidate using hr.candidate.skill model
+          // ✅ FIX: Get skill level with 100% progress (Expert level)
+          console.log('🔍 Finding Expert skill level (100% progress)...');
+          const skillLevels = await callOdoo('hr.skill.level', 'search_read', [
+            [['level_progress', '=', 100]],
+            ['id', 'name', 'level_progress']
+          ]);
+          
+          let skillLevelId;
+          if (skillLevels && skillLevels.length > 0) {
+            // Use the first skill level with 100% progress
+            skillLevelId = skillLevels[0].id;
+            console.log(`✓ Using skill level: ${skillLevels[0].name} (ID: ${skillLevelId}, Progress: 100%)`);
+          } else {
+            // Create Expert skill level with 100% progress if none exists
+            console.log('⚠ No Expert level found, creating Expert skill level with 100% progress...');
+            const defaultLevelResult = await callOdoo('hr.skill.level', 'create', [[{
+              name: 'Expert',
+              level_progress: 100
+            }]]);
+            skillLevelId = Array.isArray(defaultLevelResult) ? defaultLevelResult[0] : defaultLevelResult;
+            console.log(`✓ Created Expert skill level (ID: ${skillLevelId}, Progress: 100%)`);
+          }
+
+          // ✅ FIX: Add skill to candidate with proper skill_level_id
           console.log(`✓ Adding skill ${mainSkill} (ID: ${mainSkillId}) to candidate...`);
           const candidateSkillResult = await callOdoo('hr.candidate.skill', 'create', [[{
             candidate_id: candidateId,
             skill_id: mainSkillId,
-            skill_level_id: false, // Let Odoo use default level
+            skill_level_id: skillLevelId, // ✅ Use actual skill level ID instead of false
             level_progress: 100 // 100% expert level
           }]]);
           
