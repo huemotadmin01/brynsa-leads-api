@@ -466,19 +466,8 @@ async function startServer() {
             console.log(`✓ Contact created (ID: ${contactId})`);
           }
 
-          // Get LinkedIn source
-          const sources = await callOdoo('utm.source', 'search_read', [
-            [['name', '=', 'LinkedIn']],
-            ['id', 'name']
-          ]);
-          
-          let linkedinSourceId;
-          if (sources && sources.length > 0) {
-            linkedinSourceId = sources[0].id;
-          } else {
-            const sourceResult = await callOdoo('utm.source', 'create', [[{ name: 'LinkedIn' }]]);
-            linkedinSourceId = Array.isArray(sourceResult) ? sourceResult[0] : sourceResult;
-          }
+          // Note: hr.candidate model does not have source_id field
+          // LinkedIn source is tracked in description field instead
 
           // ✅ FIX 4: Create candidate with skill using correct many2many syntax
           console.log('✨ Creating candidate with skill...');
@@ -486,8 +475,8 @@ async function startServer() {
             partner_name: cleanName,
             email_from: emailToUse,
             partner_id: contactId,
-            user_id: salespersonId,
-            source_id: linkedinSourceId,
+            user_id: salespersonId, // ✅ This is the recruiter/sourced by user
+            // Note: hr.candidate doesn't have source_id field, only user_id for recruiter
             description: `LinkedIn: ${linkedinUrl}\nSourced by: ${sourcedBy || 'Current User'}\nCompany: ${cleanCompany || 'Not specified'}\nMain Skill: ${mainSkill}`
           };
 
