@@ -143,7 +143,7 @@ async function startServer() {
           }
         }
 
-        // ✅ REQUIREMENT 1: Get profile type (client or candidate)
+        // Get profile type (client or candidate)
         const profileType = (leadData.profileType || 'client').toLowerCase();
         
         // For candidates, company name is optional; for clients, it's required
@@ -160,7 +160,7 @@ async function startServer() {
           return res.status(400).json({ error: 'CRM configuration is incomplete' });
         }
 
-        // ✅ REQUIREMENT 3: Handle missing email - use placeholder
+        // Handle missing email - use placeholder
         const emailToUse = leadData.email && 
                           isValidEmail(leadData.email) && 
                           leadData.email.toLowerCase() !== 'no email found'
@@ -269,11 +269,53 @@ async function startServer() {
         // ========== ROUTE BASED ON PROFILE TYPE ==========
         
         if (profileType === 'candidate') {
-          // ✅ REQUIREMENT 2: Create Candidate Record
+          // ✅ FIX 2: Extract main skill from job title or headline
           console.log('📋 Creating candidate record...');
           
-          // ✅ REQUIREMENT 4: Find salesperson ID from sourcedBy
-          let salespersonId = userId; // Default to current user
+          // Extract main skill intelligently
+          let mainSkill = null;
+          const currentTitle = (leadData.function || leadData.currentTitle || '').trim();
+          const headline = (leadData.headline || '').trim();
+          
+          // Priority: currentTitle -> extract from headline -> fallback to currentTitle
+          if (currentTitle && currentTitle.toLowerCase() !== 'software engineer') {
+            mainSkill = currentTitle;
+            console.log(`✓ Using current title as skill: ${mainSkill}`);
+          } else if (headline) {
+            // Try to extract specific technology/role from headline
+            const techKeywords = [
+              '.NET', 'Java', 'Python', 'React', 'Angular', 'Vue', 'Node.js',
+              'Frontend', 'Backend', 'Full Stack', 'DevOps', 'Data Engineer',
+              'Machine Learning', 'AI', 'Cloud', 'AWS', 'Azure', 'GCP',
+              'Mobile', 'iOS', 'Android', 'Flutter', 'React Native',
+              'QA', 'Test', 'Automation', 'UI/UX', 'Product Manager'
+            ];
+            
+            for (const keyword of techKeywords) {
+              if (headline.toLowerCase().includes(keyword.toLowerCase())) {
+                mainSkill = keyword + ' Developer';
+                console.log(`✓ Extracted skill from headline: ${mainSkill}`);
+                break;
+              }
+            }
+            
+            // If no keyword found, use current title as fallback
+            if (!mainSkill && currentTitle) {
+              mainSkill = currentTitle;
+              console.log(`✓ Fallback to current title: ${mainSkill}`);
+            }
+          } else if (currentTitle) {
+            mainSkill = currentTitle;
+            console.log(`✓ Using current title as fallback: ${mainSkill}`);
+          }
+          
+          if (!mainSkill) {
+            mainSkill = 'Software Engineer'; // Ultimate fallback
+            console.log(`⚠ No skill found, using default: ${mainSkill}`);
+          }
+          
+          // Find salesperson ID from sourcedBy
+          let salespersonId = userId;
           if (sourcedBy) {
             const salespersons = await callOdoo('res.users', 'search_read', [
               [['name', 'ilike', sourcedBy]],
@@ -288,7 +330,113 @@ async function startServer() {
             }
           }
 
-          // ✅ REQUIREMENT 4: Create Contact (partner_id) first
+          // ✅ FIX 3: Get IT skill type (already exists with 185 records)
+          console.log('🔍 Finding IT skill type...');
+          const itSkillTypes = await callOdoo('hr.skill.type', 'search_read', [
+            [['name', '=', 'IT']],
+            ['id', 'name']
+          ]);
+          
+          let itSkillTypeId;
+          if (itSkillTypes && itSkillTypes.length > 0) {
+            itSkillTypeId = itSkillTypes[0].id;
+            console.log(`✓ Found IT skill type (ID: ${itSkillTypeId})`);
+          } else {
+            // Create IT skill type if not found
+            const skillTypeResult = await callOdoo('hr.skill.type', 'create', [[{ name: 'IT' }]]);
+            itSkillTypeId = Array.isArray(skillTypeResult) ? skillTypeResult[0] : skillTypeResult;
+            console.log(`✓ Created IT skill type (ID: ${itSkillTypeId})`);
+          }
+
+          // ✅ FIX 3: Check for duplicate skill by name (case-insensitive)
+          console.log(`🔍 Checking for existing skill: ${mainSkill}`);
+          const existingSkills = await callOdoo('hr.skill', 'search_read', [
+            [['name', 'ilike', mainSkill]],
+            ['id', 'name', 'skill_type_id']
+          ]);
+
+          let mainSkillId;
+          if (existingSkills && existingSkills.length > 0) {
+            mainSkillId = existingSkills[0].id;
+            console.log(`✓ Skill already exists: ${existingSkills[0].name} (ID: ${mainSkillId})`);
+          } else {
+            // ✅ FIX 4: Create skill with correct API - use skill_type_id field
+            console.log(`✓ Creating new skill: ${mainSkill} with IT type (ID: ${itSkillTypeId})`);
+            const skillResult = await callOdoo('hr.skill', 'create', [[{
+              name: mainSkill,
+              skill_type_id: itSkillTypeId // ✅ Correct field name from Odoo model
+            }]]);
+            mainSkillId = Array.isArray(skillResult) ? skillResult[0] : skillResult;
+            console.log(`✓ Skill created (ID: ${mainSkillId})`);
+          }
+
+          // ✅ FIX 1: Check if candidate already exists (by name and main skill)
+          console.log(`🔍 Checking for existing candidate: ${cleanName} with skill ${mainSkill}`);
+          
+          // First check by name only
+          const existingCandidatesByName = await callOdoo('hr.candidate', 'search_read', [
+            [['partner_name', '=', cleanName]],
+            ['id', 'partner_name', 'skill_ids']
+          ]);
+
+          let candidateExists = false;
+          let existingCandidateId = null;
+
+          if (existingCandidatesByName && existingCandidatesByName.length > 0) {
+            // Check if any candidate has the same skill
+            for (const candidate of existingCandidatesByName) {
+              if (candidate.skill_ids && candidate.skill_ids.length > 0) {
+                // Get full skill details
+                const candidateSkills = await callOdoo('hr.candidate.skill', 'search_read', [
+                  [['candidate_id', '=', candidate.id]],
+                  ['skill_id']
+                ]);
+                
+                for (const skillRel of candidateSkills) {
+                  if (skillRel.skill_id && skillRel.skill_id[0] === mainSkillId) {
+                    candidateExists = true;
+                    existingCandidateId = candidate.id;
+                    console.log(`✓ Candidate already exists with same skill (ID: ${existingCandidateId})`);
+                    break;
+                  }
+                }
+              }
+              
+              if (candidateExists) break;
+            }
+          }
+
+          // ✅ FIX 1: If duplicate found, return "Already in CRM" message
+          if (candidateExists) {
+            await exportLogs.insertOne({
+              leadName: cleanName,
+              leadEmail: emailToUse,
+              linkedinUrl: linkedinUrl,
+              crmType: 'odoo',
+              profileType: 'candidate',
+              crmId: existingCandidateId,
+              exportedBy: userEmail,
+              exportedAt: new Date(),
+              status: 'success',
+              message: 'Candidate already exists',
+              mainSkill: mainSkill
+            });
+
+            return res.json({
+              success: true,
+              message: 'Candidate already exists in Odoo CRM',
+              crmId: existingCandidateId,
+              crmType: 'odoo',
+              profileType: 'candidate',
+              alreadyExisted: true,
+              details: {
+                candidateCreated: false,
+                mainSkill: mainSkill
+              }
+            });
+          }
+
+          // Create Contact (partner_id) first
           console.log('👤 Creating contact for candidate...');
           
           const contactData = {
@@ -296,14 +444,13 @@ async function startServer() {
             type: 'contact',
             is_company: false,
             email: emailToUse,
-            customer_rank: 0 // Not a customer, just a contact
+            customer_rank: 0
           };
 
-          // Add optional phone if available
           const phone = (leadData.phone || '').trim();
           if (phone) contactData.phone = phone;
 
-          // Check if contact already exists
+          // Check if contact exists
           const existingContacts = await callOdoo('res.partner', 'search_read', [
             [['name', '=', cleanName], ['email', '=', emailToUse]],
             ['id', 'name', 'email']
@@ -319,134 +466,46 @@ async function startServer() {
             console.log(`✓ Contact created (ID: ${contactId})`);
           }
 
-          // ✅ REQUIREMENT 2: Parse skills from leadData or current title/headline
-          let skillsData = [];
-          
-          // Try to get skills from leadData.skills array
-          if (leadData.skills && Array.isArray(leadData.skills)) {
-            skillsData = leadData.skills;
-          } else if (leadData.function || leadData.currentTitle || leadData.headline) {
-            // Extract skills from job title/headline
-            const titleText = (leadData.function || leadData.currentTitle || leadData.headline || '').trim();
-            skillsData = [titleText];
-          }
-
-          // Create or find skills in Odoo
-          const skillIds = [];
-          for (const skillName of skillsData) {
-            if (!skillName || skillName.trim().length === 0) continue;
-            
-            const cleanSkillName = skillName.trim();
-            
-            // Check if skill exists
-            const existingSkills = await callOdoo('hr.skill', 'search_read', [
-              [['name', '=', cleanSkillName]],
-              ['id', 'name']
-            ]);
-
-            let skillId;
-            if (existingSkills && existingSkills.length > 0) {
-              skillId = existingSkills[0].id;
-              console.log(`✓ Skill found: ${cleanSkillName} (ID: ${skillId})`);
-            } else {
-              // Create new skill
-              const skillResult = await callOdoo('hr.skill', 'create', [[{
-                name: cleanSkillName
-              }]]);
-              skillId = Array.isArray(skillResult) ? skillResult[0] : skillResult;
-              console.log(`✓ Skill created: ${cleanSkillName} (ID: ${skillId})`);
-            }
-
-            // Add skill to candidate with 100% expert level
-            skillIds.push([0, 0, {
-              skill_id: skillId,
-              skill_level_id: false, // Will use default or create
-              level_progress: 100 // 100% expert
-            }]);
-          }
-
-          // Check if candidate already exists
-          const existingCandidates = await callOdoo('hr.candidate', 'search_read', [
-            [['partner_name', '=', cleanName], ['partner_id', '=', contactId]],
-            ['id', 'partner_name']
-          ]);
-
-          let candidateId;
-          if (existingCandidates && existingCandidates.length > 0) {
-            candidateId = existingCandidates[0].id;
-            console.log(`✓ Candidate already exists (ID: ${candidateId})`);
-            
-            // Update with missing information
-            await callOdoo('hr.candidate', 'write', [
-              [candidateId],
-              {
-                email_from: emailToUse,
-                user_id: salespersonId,
-                ...(skillIds.length > 0 ? { skill_ids: skillIds } : {})
-              }
-            ]);
-            
-            await exportLogs.insertOne({
-              leadName: cleanName,
-              leadEmail: emailToUse,
-              linkedinUrl: linkedinUrl,
-              crmType: 'odoo',
-              profileType: 'candidate',
-              crmId: candidateId,
-              contactId: contactId,
-              exportedBy: userEmail,
-              exportedAt: new Date(),
-              status: 'success',
-              message: 'Candidate already exists',
-              salespersonId: salespersonId
-            });
-
-            return res.json({
-              success: true,
-              message: 'Candidate already exists in Odoo CRM',
-              crmId: candidateId,
-              crmType: 'odoo',
-              profileType: 'candidate',
-              details: {
-                contactCreated: false,
-                candidateCreated: false,
-                contactId: contactId,
-                salespersonId: salespersonId,
-                skillsAdded: skillIds.length
-              }
-            });
-          }
-
-          // ✅ REQUIREMENT 2: Create candidate record with all fields
-          const candidateData = {
-            partner_name: cleanName,
-            email_from: emailToUse,
-            partner_id: contactId, // ✅ REQUIREMENT 4: Link to contact
-            user_id: salespersonId, // ✅ REQUIREMENT 4: Set sourced by user
-            ...(skillIds.length > 0 ? { skill_ids: skillIds } : {}), // ✅ REQUIREMENT 2: Add skills with 100% expert
-            source_id: false, // Will be set after finding LinkedIn source
-            description: `LinkedIn: ${linkedinUrl}\nSourced by: ${sourcedBy || currentUser}\nCompany: ${cleanCompany || 'Not specified'}`
-          };
-
           // Get LinkedIn source
           const sources = await callOdoo('utm.source', 'search_read', [
             [['name', '=', 'LinkedIn']],
             ['id', 'name']
           ]);
           
+          let linkedinSourceId;
           if (sources && sources.length > 0) {
-            candidateData.source_id = sources[0].id;
+            linkedinSourceId = sources[0].id;
           } else {
-            // Create LinkedIn source
             const sourceResult = await callOdoo('utm.source', 'create', [[{ name: 'LinkedIn' }]]);
-            candidateData.source_id = Array.isArray(sourceResult) ? sourceResult[0] : sourceResult;
+            linkedinSourceId = Array.isArray(sourceResult) ? sourceResult[0] : sourceResult;
           }
 
-          // Create candidate
+          // ✅ FIX 4: Create candidate with skill using correct many2many syntax
+          console.log('✨ Creating candidate with skill...');
+          const candidateData = {
+            partner_name: cleanName,
+            email_from: emailToUse,
+            partner_id: contactId,
+            user_id: salespersonId,
+            source_id: linkedinSourceId,
+            description: `LinkedIn: ${linkedinUrl}\nSourced by: ${sourcedBy || 'Current User'}\nCompany: ${cleanCompany || 'Not specified'}\nMain Skill: ${mainSkill}`
+          };
+
+          // Create candidate first
           const candidateResult = await callOdoo('hr.candidate', 'create', [[candidateData]]);
-          candidateId = Array.isArray(candidateResult) ? candidateResult[0] : candidateResult;
+          const candidateId = Array.isArray(candidateResult) ? candidateResult[0] : candidateResult;
+          console.log(`✓ Candidate created (ID: ${candidateId})`);
+
+          // ✅ FIX 4: Add skill to candidate using hr.candidate.skill model
+          console.log(`✓ Adding skill ${mainSkill} (ID: ${mainSkillId}) to candidate...`);
+          const candidateSkillResult = await callOdoo('hr.candidate.skill', 'create', [[{
+            candidate_id: candidateId,
+            skill_id: mainSkillId,
+            skill_level_id: false, // Let Odoo use default level
+            level_progress: 100 // 100% expert level
+          }]]);
           
-          console.log(`✅ Candidate created successfully (ID: ${candidateId})`);
+          console.log(`✅ Candidate created successfully with skill (ID: ${candidateId})`);
 
           // Log export
           await exportLogs.insertOne({
@@ -461,7 +520,8 @@ async function startServer() {
             exportedAt: new Date(),
             status: 'success',
             salespersonId: salespersonId,
-            skillsAdded: skillIds.length
+            mainSkill: mainSkill,
+            skillId: mainSkillId
           });
 
           return res.json({
@@ -475,12 +535,13 @@ async function startServer() {
               candidateCreated: true,
               contactId: contactId,
               salespersonId: salespersonId,
-              skillsAdded: skillIds.length
+              mainSkill: mainSkill,
+              skillId: mainSkillId
             }
           });
 
         } else {
-          // ✅ REQUIREMENT 1: Client profile - use existing opportunity creation logic
+          // Client profile - use existing opportunity creation logic
           console.log('💼 Creating opportunity record...');
 
           // Get LinkedIn source
@@ -602,7 +663,7 @@ async function startServer() {
           if (existingLeads && existingLeads.length > 0) {
             leadId = existingLeads[0].id;
             
-            // ✅ REQUIREMENT 3: Update email field even for existing opportunities
+            // Update email field even for existing opportunities
             await callOdoo('crm.lead', 'write', [
               [leadId],
               { email_from: emailToUse, website: linkedinUrl }
@@ -647,8 +708,8 @@ async function startServer() {
             user_id: salespersonId,
             source_id: linkedinSourceId,
             x_studio_client_type: clientType,
-            email_from: emailToUse, // ✅ REQUIREMENT 3: Set email (even if placeholder)
-            website: linkedinUrl // LinkedIn URL
+            email_from: emailToUse,
+            website: linkedinUrl
           };
 
           const phone = (leadData.phone || '').trim();
