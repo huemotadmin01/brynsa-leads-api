@@ -480,11 +480,11 @@ async function startServer() {
           const candidateId = Array.isArray(candidateResult) ? candidateResult[0] : candidateResult;
           console.log(`✓ Candidate created (ID: ${candidateId})`);
 
-          // ✅ FIX: Get skill level with 100% progress (Expert level)
-          console.log('🔍 Finding Expert skill level (100% progress)...');
+          // ✅ FIX: Get skill level with 100% progress (Expert level) for the IT skill type
+          console.log('🔍 Finding Expert skill level (100% progress) for IT skill type...');
           const skillLevels = await callOdoo('hr.skill.level', 'search_read', [
-            [['level_progress', '=', 100]],
-            ['id', 'name', 'level_progress']
+            [['level_progress', '=', 100], ['skill_type_id', '=', itSkillTypeId]],
+            ['id', 'name', 'level_progress', 'skill_type_id']
           ]);
           
           let skillLevelId;
@@ -494,10 +494,11 @@ async function startServer() {
             console.log(`✓ Using skill level: ${skillLevels[0].name} (ID: ${skillLevelId}, Progress: 100%)`);
           } else {
             // Create Expert skill level with 100% progress if none exists
-            console.log('⚠ No Expert level found, creating Expert skill level with 100% progress...');
+            console.log('⚠ No Expert level found, creating Expert skill level with 100% progress for IT...');
             const defaultLevelResult = await callOdoo('hr.skill.level', 'create', [[{
               name: 'Expert',
-              level_progress: 100
+              level_progress: 100,
+              skill_type_id: itSkillTypeId // ✅ Required field: must link to skill type
             }]]);
             skillLevelId = Array.isArray(defaultLevelResult) ? defaultLevelResult[0] : defaultLevelResult;
             console.log(`✓ Created Expert skill level (ID: ${skillLevelId}, Progress: 100%)`);
@@ -512,7 +513,15 @@ async function startServer() {
             level_progress: 100 // 100% expert level
           }]]);
           
-          console.log(`✅ Candidate created successfully with skill (ID: ${candidateId})`);
+          console.log(`✅ Candidate skill added successfully`);
+          
+          // ✅ UPDATE: Add LinkedIn profile URL to candidate
+          console.log(`✓ Updating candidate with LinkedIn profile URL...`);
+          await callOdoo('hr.candidate', 'write', [
+            [candidateId],
+            { linkedin_profile: linkedinUrl }
+          ]);
+          console.log(`✅ Candidate created successfully with LinkedIn URL (ID: ${candidateId})`);
 
           // Log export
           await exportLogs.insertOne({
