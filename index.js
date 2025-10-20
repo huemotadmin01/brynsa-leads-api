@@ -330,91 +330,29 @@ async function startServer() {
             }
           }
 
-          // Get IT skill type (already exists with 185 records)
-          console.log('🔍 Finding IT skill type...');
-          const itSkillTypes = await callOdoo('hr.skill.type', 'search_read', [
-            [['name', '=', 'IT']],
-            ['id', 'name']
-          ]);
+          // ✅ IMPROVED: Check if candidate already exists by name AND email (more robust duplicate check)
+          console.log(`🔍 Checking for existing candidate: ${cleanName} with email ${emailToUse}`);
           
-          let itSkillTypeId;
-          if (itSkillTypes && itSkillTypes.length > 0) {
-            itSkillTypeId = itSkillTypes[0].id;
-            console.log(`✓ Found IT skill type (ID: ${itSkillTypeId})`);
-          } else {
-            // Create IT skill type if not found
-            const skillTypeResult = await callOdoo('hr.skill.type', 'create', [[{ name: 'IT' }]]);
-            itSkillTypeId = Array.isArray(skillTypeResult) ? skillTypeResult[0] : skillTypeResult;
-            console.log(`✓ Created IT skill type (ID: ${itSkillTypeId})`);
-          }
-
-          // Check for duplicate skill by name (case-insensitive)
-          console.log(`🔍 Checking for existing skill: ${mainSkill}`);
-          const existingSkills = await callOdoo('hr.skill', 'search_read', [
-            [['name', 'ilike', mainSkill]],
-            ['id', 'name', 'skill_type_id']
+          const existingCandidates = await callOdoo('hr.candidate', 'search_read', [
+            [
+              '|', // OR condition
+              ['partner_name', '=', cleanName],
+              ['email_from', '=', emailToUse]
+            ],
+            ['id', 'partner_name', 'email_from', 'skill_ids']
           ]);
 
-          let mainSkillId;
-          if (existingSkills && existingSkills.length > 0) {
-            mainSkillId = existingSkills[0].id;
-            console.log(`✓ Skill already exists: ${existingSkills[0].name} (ID: ${mainSkillId})`);
-          } else {
-            // Create skill with correct API - use skill_type_id field
-            console.log(`✓ Creating new skill: ${mainSkill} with IT type (ID: ${itSkillTypeId})`);
-            const skillResult = await callOdoo('hr.skill', 'create', [[{
-              name: mainSkill,
-              skill_type_id: itSkillTypeId
-            }]]);
-            mainSkillId = Array.isArray(skillResult) ? skillResult[0] : skillResult;
-            console.log(`✓ Skill created (ID: ${mainSkillId})`);
-          }
-
-          // Check if candidate already exists (by name and main skill)
-          console.log(`🔍 Checking for existing candidate: ${cleanName} with skill ${mainSkill}`);
-          
-          // First check by name only
-          const existingCandidatesByName = await callOdoo('hr.candidate', 'search_read', [
-            [['partner_name', '=', cleanName]],
-            ['id', 'partner_name', 'skill_ids']
-          ]);
-
-          let candidateExists = false;
-          let existingCandidateId = null;
-
-          if (existingCandidatesByName && existingCandidatesByName.length > 0) {
-            // Check if any candidate has the same skill
-            for (const candidate of existingCandidatesByName) {
-              if (candidate.skill_ids && candidate.skill_ids.length > 0) {
-                // Get full skill details
-                const candidateSkills = await callOdoo('hr.candidate.skill', 'search_read', [
-                  [['candidate_id', '=', candidate.id]],
-                  ['skill_id']
-                ]);
-                
-                for (const skillRel of candidateSkills) {
-                  if (skillRel.skill_id && skillRel.skill_id[0] === mainSkillId) {
-                    candidateExists = true;
-                    existingCandidateId = candidate.id;
-                    console.log(`✓ Candidate already exists with same skill (ID: ${existingCandidateId})`);
-                    break;
-                  }
-                }
-              }
-              
-              if (candidateExists) break;
-            }
-          }
-
-          // If duplicate found, return "Already in CRM" message
-          if (candidateExists) {
+          if (existingCandidates && existingCandidates.length > 0) {
+            const existingCandidate = existingCandidates[0];
+            console.log(`✓ Candidate already exists (ID: ${existingCandidate.id})`);
+            
             await exportLogs.insertOne({
               leadName: cleanName,
               leadEmail: emailToUse,
               linkedinUrl: linkedinUrl,
               crmType: 'odoo',
               profileType: 'candidate',
-              crmId: existingCandidateId,
+              crmId: existingCandidate.id,
               exportedBy: userEmail,
               exportedAt: new Date(),
               status: 'success',
@@ -424,8 +362,8 @@ async function startServer() {
 
             return res.json({
               success: true,
-              message: 'Candidate already exists in Odoo CRM',
-              crmId: existingCandidateId,
+              message: 'Candidate already exists in Odoo Talent Pool',
+              crmId: existingCandidate.id,
               crmType: 'odoo',
               profileType: 'candidate',
               alreadyExisted: true,
@@ -466,62 +404,95 @@ async function startServer() {
             console.log(`✓ Contact created (ID: ${contactId})`);
           }
 
-          // ✅ FIX: Create candidate without description field (doesn't exist in hr.candidate)
-          console.log('✨ Creating candidate...');
+          // ✅ Create candidate with LinkedIn URL directly
+          console.log('✨ Creating candidate with LinkedIn profile...');
           const candidateData = {
             partner_name: cleanName,
             email_from: emailToUse,
             partner_id: contactId,
-            user_id: salespersonId, // ✅ This is the recruiter/sourced by user
+            user_id: salespersonId,
+            linkedin_profile: linkedinUrl // ✅ Add LinkedIn URL during creation
           };
 
-          // Create candidate first
-          const candidateResult = await callOdoo('hr.candidate', 'create', [[candidateData]]);
-          const candidateId = Array.isArray(candidateResult) ? candidateResult[0] : candidateResult;
-          console.log(`✓ Candidate created (ID: ${candidateId})`);
-
-          // ✅ FIX: Get skill level with 100% progress (Expert level) for the IT skill type
-          console.log('🔍 Finding Expert skill level (100% progress) for IT skill type...');
-          const skillLevels = await callOdoo('hr.skill.level', 'search_read', [
-            [['level_progress', '=', 100], ['skill_type_id', '=', itSkillTypeId]],
-            ['id', 'name', 'level_progress', 'skill_type_id']
-          ]);
-          
-          let skillLevelId;
-          if (skillLevels && skillLevels.length > 0) {
-            // Use the first skill level with 100% progress
-            skillLevelId = skillLevels[0].id;
-            console.log(`✓ Using skill level: ${skillLevels[0].name} (ID: ${skillLevelId}, Progress: 100%)`);
-          } else {
-            // Create Expert skill level with 100% progress if none exists
-            console.log('⚠ No Expert level found, creating Expert skill level with 100% progress for IT...');
-            const defaultLevelResult = await callOdoo('hr.skill.level', 'create', [[{
-              name: 'Expert',
-              level_progress: 100,
-              skill_type_id: itSkillTypeId // ✅ Required field: must link to skill type
-            }]]);
-            skillLevelId = Array.isArray(defaultLevelResult) ? defaultLevelResult[0] : defaultLevelResult;
-            console.log(`✓ Created Expert skill level (ID: ${skillLevelId}, Progress: 100%)`);
+          // Add company if available (for candidates, it's optional)
+          if (cleanCompany && cleanCompany.length > 0) {
+            candidateData.partner_name = `${cleanName} - ${cleanCompany}`;
           }
 
-          // ✅ FIX: Add skill to candidate with proper skill_level_id
-          console.log(`✓ Adding skill ${mainSkill} (ID: ${mainSkillId}) to candidate...`);
-          const candidateSkillResult = await callOdoo('hr.candidate.skill', 'create', [[{
+          const candidateResult = await callOdoo('hr.candidate', 'create', [[candidateData]]);
+          const candidateId = Array.isArray(candidateResult) ? candidateResult[0] : candidateResult;
+          console.log(`✓ Candidate created with LinkedIn URL (ID: ${candidateId})`);
+
+          // ✅ SIMPLIFIED: Always use IT skill type and Expert (100%) level
+          console.log('🔍 Setting up IT skill type and Expert level...');
+          
+          // Get or create "IT" skill type
+          let itSkillTypes = await callOdoo('hr.skill.type', 'search_read', [
+            [['name', '=', 'IT']],
+            ['id', 'name']
+          ]);
+          
+          let itSkillTypeId;
+          if (itSkillTypes && itSkillTypes.length > 0) {
+            itSkillTypeId = itSkillTypes[0].id;
+            console.log(`✓ Found IT skill type (ID: ${itSkillTypeId})`);
+          } else {
+            const skillTypeResult = await callOdoo('hr.skill.type', 'create', [[{ name: 'IT' }]]);
+            itSkillTypeId = Array.isArray(skillTypeResult) ? skillTypeResult[0] : skillTypeResult;
+            console.log(`✓ Created IT skill type (ID: ${itSkillTypeId})`);
+          }
+
+          // Get or create "Expert (100%)" skill level for IT
+          let expertLevels = await callOdoo('hr.skill.level', 'search_read', [
+            [['level_progress', '=', 100], ['skill_type_id', '=', itSkillTypeId]],
+            ['id', 'name', 'level_progress']
+          ]);
+          
+          let expertLevelId;
+          if (expertLevels && expertLevels.length > 0) {
+            expertLevelId = expertLevels[0].id;
+            console.log(`✓ Found Expert level (ID: ${expertLevelId}, Progress: 100%)`);
+          } else {
+            const levelResult = await callOdoo('hr.skill.level', 'create', [[{
+              name: 'Expert',
+              level_progress: 100,
+              skill_type_id: itSkillTypeId
+            }]]);
+            expertLevelId = Array.isArray(levelResult) ? levelResult[0] : levelResult;
+            console.log(`✓ Created Expert level (ID: ${expertLevelId}, Progress: 100%)`);
+          }
+
+          // Check for existing skill or create new one
+          console.log(`🔍 Looking for skill: ${mainSkill}`);
+          const existingSkills = await callOdoo('hr.skill', 'search_read', [
+            [['name', 'ilike', mainSkill], ['skill_type_id', '=', itSkillTypeId]],
+            ['id', 'name']
+          ]);
+
+          let mainSkillId;
+          if (existingSkills && existingSkills.length > 0) {
+            mainSkillId = existingSkills[0].id;
+            console.log(`✓ Skill already exists: ${existingSkills[0].name} (ID: ${mainSkillId})`);
+          } else {
+            console.log(`✓ Creating new skill: ${mainSkill} under IT type`);
+            const skillResult = await callOdoo('hr.skill', 'create', [[{
+              name: mainSkill,
+              skill_type_id: itSkillTypeId
+            }]]);
+            mainSkillId = Array.isArray(skillResult) ? skillResult[0] : skillResult;
+            console.log(`✓ Skill created (ID: ${mainSkillId})`);
+          }
+
+          // ✅ Add skill to candidate (IT type, Expert level, dynamic skill)
+          console.log(`✓ Adding skill "${mainSkill}" (IT/Expert/100%) to candidate...`);
+          await callOdoo('hr.candidate.skill', 'create', [[{
             candidate_id: candidateId,
             skill_id: mainSkillId,
-            skill_level_id: skillLevelId, // ✅ Use actual skill level ID instead of false
-            level_progress: 100 // 100% expert level
+            skill_level_id: expertLevelId,
+            level_progress: 100
           }]]);
           
-          console.log(`✅ Candidate skill added successfully`);
-          
-          // ✅ UPDATE: Add LinkedIn profile URL to candidate
-          console.log(`✓ Updating candidate with LinkedIn profile URL...`);
-          await callOdoo('hr.candidate', 'write', [
-            [candidateId],
-            { linkedin_profile: linkedinUrl }
-          ]);
-          console.log(`✅ Candidate created successfully with LinkedIn URL (ID: ${candidateId})`);
+          console.log(`✅ Candidate created successfully with LinkedIn URL and skill!`);
 
           // Log export
           await exportLogs.insertOne({
