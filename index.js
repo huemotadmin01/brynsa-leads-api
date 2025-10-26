@@ -585,10 +585,10 @@ async function startServer() {
       }
     });
 
-    // Check if already exported
+    // Check if already exported - UPDATED to verify in Odoo
     app.get('/api/crm/check-export', async (req, res) => {
       try {
-        const { url, userEmail } = req.query;
+        const { url, userEmail, crmConfig } = req.query;
 
         if (!url || !userEmail) {
           return res.status(400).json({ 
@@ -597,6 +597,7 @@ async function startServer() {
           });
         }
 
+        // First check MongoDB logs
         const existingExport = await exportLogs.findOne({
           linkedinUrl: url,
           exportedBy: userEmail,
@@ -604,16 +605,153 @@ async function startServer() {
           crmType: 'odoo'
         });
 
-        if (existingExport) {
+        // If not in MongoDB, definitely not exported
+        if (!existingExport) {
+          return res.json({ alreadyExported: false });
+        }
+
+        // ✅ IMPORTANT: Verify the record still exists in Odoo
+        // (In case it was manually deleted from Odoo)
+        
+        // If no CRM config provided, can't verify in Odoo
+        if (!crmConfig) {
+          console.warn('No CRM config provided, cannot verify in Odoo');
           return res.json({
             alreadyExported: true,
             exportedAt: existingExport.exportedAt,
             crmId: existingExport.crmId,
-            crmType: existingExport.crmType
+            crmType: existingExport.crmType,
+            verified: false
           });
         }
 
-        res.json({ alreadyExported: false });
+        try {
+          // Parse CRM config
+          const config = JSON.parse(crmConfig);
+          
+          if (!config.endpointUrl || !config.username || !config.password || !config.databaseName) {
+            throw new Error('Incomplete CRM config');
+          }
+
+          // Authenticate with Odoo
+          const authUrl = `${config.endpointUrl}/web/session/authenticate`;
+          const authResponse = await fetch(authUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              params: {
+                db: config.databaseName,
+                login: config.username,
+                password: config.password
+              }
+            })
+          });
+
+          if (!authResponse.ok) {
+            throw new Error('Odoo authentication failed');
+          }
+
+          const setCookieHeader = authResponse.headers.get('set-cookie');
+          let cookies = '';
+          if (setCookieHeader) {
+            cookies = setCookieHeader.split(',').map(c => c.trim().split(';')[0]).join('; ');
+          }
+
+          const authResult = await authResponse.json();
+          if (!authResult.result?.uid) {
+            throw new Error('Invalid Odoo credentials');
+          }
+
+          const userId = authResult.result.uid;
+          const sessionId = authResult.result.session_id;
+          if (!cookies && sessionId) cookies = `session_id=${sessionId}`;
+
+          const odooUrl = `${config.endpointUrl}/jsonrpc`;
+
+          // Check if the opportunity still exists in Odoo by ID
+          const checkResponse = await fetch(odooUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Cookie': cookies
+            },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              method: "call",
+              params: {
+                service: "object",
+                method: "execute_kw",
+                args: [
+                  config.databaseName,
+                  userId,
+                  config.password,
+                  'crm.lead',
+                  'search_read',
+                  [[['id', '=', existingExport.crmId]]],
+                  ['id', 'name', 'active']
+                ]
+              },
+              id: Date.now()
+            })
+          });
+
+          if (!checkResponse.ok) {
+            console.warn('Failed to check Odoo, assuming exists');
+            // If we can't check Odoo, return based on MongoDB
+            return res.json({
+              alreadyExported: true,
+              exportedAt: existingExport.exportedAt,
+              crmId: existingExport.crmId,
+              crmType: existingExport.crmType,
+              verified: false
+            });
+          }
+
+          const checkResult = await checkResponse.json();
+          const opportunities = checkResult.result || [];
+
+          // If opportunity doesn't exist in Odoo (was deleted)
+          if (opportunities.length === 0) {
+            console.log(`Opportunity ${existingExport.crmId} not found in Odoo (was deleted manually)`);
+            
+            // ✅ Don't clean up MongoDB - just return that it doesn't exist in Odoo
+            return res.json({ 
+              alreadyExported: false,
+              wasDeleted: true,
+              mongoDbHasLog: true // MongoDB still has the log
+            });
+          }
+
+          // Opportunity exists in Odoo
+          return res.json({
+            alreadyExported: true,
+            exportedAt: existingExport.exportedAt,
+            crmId: existingExport.crmId,
+            crmType: existingExport.crmType,
+            verified: true
+          });
+
+        } catch (odooError) {
+          console.warn('Error verifying in Odoo:', odooError.message);
+          // If verification fails, return based on MongoDB
+          return res.json({
+            alreadyExported: true,
+            exportedAt: existingExport.exportedAt,
+            crmId: existingExport.crmId,
+            crmType: existingExport.crmType,
+            verified: false
+          });
+        }
+
+      } catch (error) {
+        console.error('Export check error:', error);
+        res.status(200).json({
+          alreadyExported: false,
+          error: error.message
+        });
+      }
+    });
 
       } catch (error) {
         console.error('Export check error:', error);
