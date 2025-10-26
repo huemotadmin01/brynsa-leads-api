@@ -116,7 +116,7 @@ async function startServer() {
         if (createdRecords.opportunity || createdRecords.candidate) {
           const entityType = createdRecords.opportunity ? 'opportunity' : 'candidate';
           const entityId = createdRecords.opportunity || createdRecords.candidate;
-          const modelName = createdRecords.opportunity ? 'crm.lead' : 'hr.applicant';
+          const modelName = createdRecords.opportunity ? 'crm.lead' : 'hr.candidate';
           
           console.log(`Rolling back ${entityType}:`, entityId);
           try {
@@ -311,7 +311,7 @@ async function startServer() {
             const cleanEmail = (email && isValidEmail(email) && email !== 'No email found') ? email : null;
 
             // ✅ 3.1 Duplicate Check - Check if candidate already exists
-            const existingCandidates = await callOdoo('hr.applicant', 'search_read', [
+            const existingCandidates = await callOdoo('hr.candidate', 'search_read', [
               [
                 ['partner_name', '=', cleanName],
                 ...(cleanEmail ? [['email_from', '=', cleanEmail]] : [])
@@ -407,7 +407,7 @@ async function startServer() {
               candidateData.user_id = userId;
             }
 
-            const candidateResult = await callOdoo('hr.applicant', 'create', [[candidateData]]);
+            const candidateResult = await callOdoo('hr.candidate', 'create', [[candidateData]]);
             const candidateId = Array.isArray(candidateResult) ? candidateResult[0] : candidateResult;
             createdRecords.candidate = candidateId;
             console.log('Candidate created. ID:', candidateId);
@@ -916,8 +916,8 @@ async function startServer() {
 
           const odooUrl = `${config.endpointUrl}/jsonrpc`;
 
-          // Check both crm.lead and hr.applicant
-          const modelName = existingExport.profileType === 'candidate' ? 'hr.applicant' : 'crm.lead';
+          // Check both crm.lead and hr.candidate
+          const modelName = existingExport.profileType === 'candidate' ? 'hr.candidate' : 'crm.lead';
           
           const checkResponse = await fetch(odooUrl, {
             method: 'POST',
