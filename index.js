@@ -753,15 +753,6 @@ async function startServer() {
       }
     });
 
-      } catch (error) {
-        console.error('Export check error:', error);
-        res.status(200).json({
-          alreadyExported: false,
-          error: error.message
-        });
-      }
-    });
-
     console.log('✅ Odoo CRM export endpoints registered');
 
     app.listen(3000, () => {
