@@ -316,7 +316,7 @@ async function startServer() {
                 ['partner_name', '=', cleanName],
                 ...(cleanEmail ? [['email_from', '=', cleanEmail]] : [])
               ],
-              ['id', 'partner_name', 'email_from', 'stage_id']
+              ['id', 'partner_name', 'email_from']  // Removed stage_id - not part of hr.candidate model
             ]);
 
             if (existingCandidates && existingCandidates.length > 0) {
@@ -342,8 +342,8 @@ async function startServer() {
                 message: 'Candidate already exists in Odoo',
                 crmId: existing.id,
                 crmType: 'odoo',
-                candidateName: existing.partner_name,
-                stage: existing.stage_id?.[1] || 'Unknown'
+                candidateName: existing.partner_name
+                // Removed stage field - stage_id doesn't exist in hr.candidate model
               });
             }
 
