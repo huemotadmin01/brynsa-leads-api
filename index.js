@@ -483,41 +483,84 @@ async function startServer() {
                   console.log(`Created IT skill type: ${itSkillTypeId}`);
                 }
 
-                // Find or create the skill itself
+                // ✅ Find or create the skill itself with improved duplicate handling
                 let skillId = null;
-                const skills = await callOdoo('hr.skill', 'search_read', [
-                  [['name', '=', mainSkill], ['skill_type_id', '=', itSkillTypeId]],
+                
+                // First, try exact match (case-insensitive)
+                console.log(`🔍 Searching for skill: "${mainSkill}" in IT skill type`);
+                let skills = await callOdoo('hr.skill', 'search_read', [
+                  [['name', 'ilike', mainSkill], ['skill_type_id', '=', itSkillTypeId]],
                   ['id', 'name']
                 ]);
                 
                 if (skills && skills.length > 0) {
                   skillId = skills[0].id;
-                  console.log(`Found existing skill: ${mainSkill} (ID: ${skillId})`);
+                  console.log(`✅ Found existing skill: "${skills[0].name}" (ID: ${skillId})`);
+                  
+                  // If multiple skills found with similar names, log them
+                  if (skills.length > 1) {
+                    console.log(`ℹ️ Found ${skills.length} similar skills:`, skills.map(s => `"${s.name}" (ID: ${s.id})`).join(', '));
+                    console.log(`ℹ️ Using the first one: "${skills[0].name}" (ID: ${skillId})`);
+                  }
                 } else {
-                  const skillResult = await callOdoo('hr.skill', 'create', [[
-                    { name: mainSkill, skill_type_id: itSkillTypeId }
-                  ]]);
-                  skillId = Array.isArray(skillResult) ? skillResult[0] : skillResult;
-                  console.log(`Created skill: ${mainSkill} (ID: ${skillId})`);
+                  console.log(`⚠️ No existing skill found, creating new skill: "${mainSkill}"`);
+                  
+                  try {
+                    const skillResult = await callOdoo('hr.skill', 'create', [[
+                      { name: mainSkill, skill_type_id: itSkillTypeId }
+                    ]]);
+                    skillId = Array.isArray(skillResult) ? skillResult[0] : skillResult;
+                    console.log(`✅ Created new skill: "${mainSkill}" (ID: ${skillId})`);
+                  } catch (createError) {
+                    console.error(`❌ Failed to create skill "${mainSkill}":`, createError.message);
+                    
+                    // If creation fails, maybe it was just created by another process
+                    // Try searching again
+                    console.log('🔄 Retrying skill search in case it was just created...');
+                    skills = await callOdoo('hr.skill', 'search_read', [
+                      [['name', 'ilike', mainSkill], ['skill_type_id', '=', itSkillTypeId]],
+                      ['id', 'name']
+                    ]);
+                    
+                    if (skills && skills.length > 0) {
+                      skillId = skills[0].id;
+                      console.log(`✅ Found skill on retry: "${skills[0].name}" (ID: ${skillId})`);
+                    } else {
+                      throw createError;
+                    }
+                  }
                 }
 
-                // Find skill level "Expert (100%)" - the actual level name in Odoo
+                // Find skill level "Expert" that belongs to IT skill type
+                // Based on Odoo configuration: IT skill type has levels: Expert, Advanced, Intermediate, Elementary, Beginner
                 let skillLevelId = null;
                 const skillLevels = await callOdoo('hr.skill.level', 'search_read', [
-                  [['name', 'ilike', '100%']],  // Using 'ilike' to match any level containing "100%"
-                  ['id', 'name']
+                  [
+                    ['name', '=', 'Expert'],  // Search for "Expert" level (highest level in IT)
+                    ['skill_type_id', '=', itSkillTypeId]
+                  ],
+                  ['id', 'name', 'skill_type_id', 'level_progress']
                 ]);
                 
                 if (skillLevels && skillLevels.length > 0) {
                   skillLevelId = skillLevels[0].id;
-                  console.log(`Found existing skill level: ${skillLevels[0].name} (ID: ${skillLevelId})`);
+                  console.log(`✅ Found existing skill level: ${skillLevels[0].name} (ID: ${skillLevelId}, Progress: ${skillLevels[0].level_progress || 'N/A'}) for IT skill type`);
                 } else {
-                  console.log('⚠️ No skill level found with "100%" - trying to create "Expert (100%)"');
-                  const levelResult = await callOdoo('hr.skill.level', 'create', [[
-                    { name: 'Expert (100%)', level_progress: 100 }
-                  ]]);
-                  skillLevelId = Array.isArray(levelResult) ? levelResult[0] : levelResult;
-                  console.log(`Created skill level: Expert (100%) (ID: ${skillLevelId})`);
+                  console.log('⚠️ No "Expert" skill level found for IT type - trying to create it');
+                  try {
+                    const levelResult = await callOdoo('hr.skill.level', 'create', [[
+                      { 
+                        name: 'Expert', 
+                        level_progress: 100,
+                        skill_type_id: itSkillTypeId
+                      }
+                    ]]);
+                    skillLevelId = Array.isArray(levelResult) ? levelResult[0] : levelResult;
+                    console.log(`✅ Created skill level: Expert (ID: ${skillLevelId}) for IT skill type`);
+                  } catch (createError) {
+                    console.error('❌ Failed to create Expert level:', createError.message);
+                    throw createError;
+                  }
                 }
 
                 // ✅ CHECK DUPLICATE: Check if this candidate-skill combination already exists
