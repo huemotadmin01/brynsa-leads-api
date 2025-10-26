@@ -109,6 +109,54 @@ async function startServer() {
 
     // ========== ODOO CRM EXPORT ==========
 
+    // Helper function to rollback created records
+    async function rollbackCreatedRecords(callOdoo, createdRecords) {
+      const rollbackResults = [];
+      
+      try {
+        // Delete in reverse order: opportunity -> contact -> company
+        if (createdRecords.opportunity) {
+          console.log('Rolling back opportunity:', createdRecords.opportunity);
+          try {
+            await callOdoo('crm.lead', 'unlink', [[createdRecords.opportunity]]);
+            rollbackResults.push({ type: 'opportunity', id: createdRecords.opportunity, status: 'deleted' });
+            console.log('✅ Opportunity rolled back');
+          } catch (err) {
+            console.error('❌ Failed to rollback opportunity:', err.message);
+            rollbackResults.push({ type: 'opportunity', id: createdRecords.opportunity, status: 'failed', error: err.message });
+          }
+        }
+
+        if (createdRecords.contact) {
+          console.log('Rolling back contact:', createdRecords.contact);
+          try {
+            await callOdoo('res.partner', 'unlink', [[createdRecords.contact]]);
+            rollbackResults.push({ type: 'contact', id: createdRecords.contact, status: 'deleted' });
+            console.log('✅ Contact rolled back');
+          } catch (err) {
+            console.error('❌ Failed to rollback contact:', err.message);
+            rollbackResults.push({ type: 'contact', id: createdRecords.contact, status: 'failed', error: err.message });
+          }
+        }
+
+        if (createdRecords.company) {
+          console.log('Rolling back company:', createdRecords.company);
+          try {
+            await callOdoo('res.partner', 'unlink', [[createdRecords.company]]);
+            rollbackResults.push({ type: 'company', id: createdRecords.company, status: 'deleted' });
+            console.log('✅ Company rolled back');
+          } catch (err) {
+            console.error('❌ Failed to rollback company:', err.message);
+            rollbackResults.push({ type: 'company', id: createdRecords.company, status: 'failed', error: err.message });
+          }
+        }
+      } catch (err) {
+        console.error('❌ Rollback process error:', err.message);
+      }
+
+      return rollbackResults;
+    }
+
     app.post('/api/crm/export-odoo', async (req, res) => {
       try {
         const { leadData, crmConfig, userEmail, linkedinUrl } = req.body;
@@ -156,25 +204,6 @@ async function startServer() {
         }
 
         console.log('Odoo export:', { lead: cleanName, company: cleanCompany, sourcedBy, linkedinUrl });
-
-        // Check if already exported
-        const existingExport = await exportLogs.findOne({
-          linkedinUrl: linkedinUrl,
-          exportedBy: userEmail,
-          crmType: 'odoo',
-          status: 'success'
-        });
-
-        if (existingExport) {
-          return res.status(200).json({
-            success: true,
-            message: 'Lead already exported to Odoo CRM',
-            crmId: existingExport.crmId,
-            crmType: 'odoo',
-            alreadyExisted: true,
-            exportedAt: existingExport.exportedAt
-          });
-        }
 
         // Authenticate
         const authUrl = `${crmConfig.endpointUrl}/web/session/authenticate`;
@@ -276,37 +305,46 @@ async function startServer() {
           salespersonId = userId;
         }
 
-        // Check company
-        const existingCompanies = await callOdoo('res.partner', 'search_read', [
-          [['name', '=', cleanCompany], ['is_company', '=', true]],
-          ['id', 'name']
-        ]);
+        // Track created records for rollback
+        const createdRecords = {
+          company: null,
+          contact: null,
+          opportunity: null
+        };
 
-        let companyId;
-        let isExistingCompany = false;
-        let clientType;
-
-        if (existingCompanies && existingCompanies.length > 0) {
-          companyId = existingCompanies[0].id;
-          isExistingCompany = true;
-          clientType = 'Existing Client';
-          console.log('Company exists. ID:', companyId);
-        } else {
-          console.log('Creating company...');
-          const companyResult = await callOdoo('res.partner', 'create', [
-            [{
-              name: cleanCompany,
-              is_company: true,
-              customer_rank: 1,
-              user_id: salespersonId
-            }]
+        try {
+          // Check company
+          const existingCompanies = await callOdoo('res.partner', 'search_read', [
+            [['name', '=', cleanCompany], ['is_company', '=', true]],
+            ['id', 'name']
           ]);
-          
-          companyId = Array.isArray(companyResult) ? companyResult[0] : companyResult;
-          isExistingCompany = false;
-          clientType = 'New Prospect';
-          console.log('Company created. ID:', companyId, 'Client Type:', clientType);
-        }
+
+          let companyId;
+          let isExistingCompany = false;
+          let clientType;
+
+          if (existingCompanies && existingCompanies.length > 0) {
+            companyId = existingCompanies[0].id;
+            isExistingCompany = true;
+            clientType = 'Existing Client';
+            console.log('Company exists. ID:', companyId, 'Client Type:', clientType);
+          } else {
+            console.log('Creating company...');
+            const companyResult = await callOdoo('res.partner', 'create', [
+              [{
+                name: cleanCompany,
+                is_company: true,
+                customer_rank: 1,
+                user_id: salespersonId
+              }]
+            ]);
+            
+            companyId = Array.isArray(companyResult) ? companyResult[0] : companyResult;
+            isExistingCompany = false;
+            clientType = 'New Prospect';
+            createdRecords.company = companyId; // Track for rollback
+            console.log('Company created. ID:', companyId, 'Client Type:', clientType);
+          }
 
         // Check contact
         const existingContacts = await callOdoo('res.partner', 'search_read', [
@@ -358,44 +396,81 @@ async function startServer() {
           ]);
           
           contactId = Array.isArray(contactResult) ? contactResult[0] : contactResult;
+          createdRecords.contact = contactId; // Track for rollback
           console.log('Contact created. ID:', contactId);
         }
 
-        // Check for existing lead
-        const existingLeads = await callOdoo('crm.lead', 'search_read', [
-          [['partner_id', '=', contactId]],
-          ['id', 'name']
+        // ✅ CHECK FOR DUPLICATE OPPORTUNITIES IN ODOO (not archived)
+        // Check by contact (partner_id)
+        const existingLeadsByContact = await callOdoo('crm.lead', 'search_read', [
+          [
+            ['partner_id', '=', contactId],
+            ['active', '=', true] // Excludes archived records
+          ],
+          ['id', 'name', 'stage_id', 'probability']
         ]);
 
-        let leadId;
+        // Also check by LinkedIn URL in website field (more specific check)
+        let existingLeadsByLinkedIn = [];
+        if (linkedinUrl) {
+          existingLeadsByLinkedIn = await callOdoo('crm.lead', 'search_read', [
+            [
+              ['website', '=', linkedinUrl],
+              ['active', '=', true]
+            ],
+            ['id', 'name', 'stage_id', 'probability', 'partner_id']
+          ]);
+        }
 
-        if (existingLeads && existingLeads.length > 0) {
-          leadId = existingLeads[0].id;
+        // Combine both checks
+        const allExistingLeads = [...existingLeadsByContact, ...existingLeadsByLinkedIn];
+        
+        // Remove duplicates by ID
+        const uniqueLeads = allExistingLeads.filter((lead, index, self) =>
+          index === self.findIndex(l => l.id === lead.id)
+        );
+
+        if (uniqueLeads && uniqueLeads.length > 0) {
+          const existingLead = uniqueLeads[0];
           
+          console.log('Duplicate opportunity found in Odoo:', {
+            id: existingLead.id,
+            name: existingLead.name,
+            stage: existingLead.stage_id?.[1] || 'Unknown',
+            probability: existingLead.probability
+          });
+
+          // Rollback any created records
+          await rollbackCreatedRecords(callOdoo, createdRecords);
+
+          // Log to MongoDB for tracking
           await exportLogs.insertOne({
             leadName: cleanName,
             leadEmail: leadData.email,
             linkedinUrl: linkedinUrl,
             crmType: 'odoo',
-            crmId: leadId,
+            crmId: existingLead.id,
             exportedBy: userEmail,
             exportedAt: new Date(),
-            status: 'success',
-            message: 'Lead already exists',
+            status: 'duplicate',
+            message: 'Opportunity already exists in Odoo',
             companyId: companyId,
             contactId: contactId
           });
 
           return res.json({
-            success: true,
-            message: `Lead already exists in Odoo CRM. ${isExistingCompany ? 'Company and contact were found.' : 'New company was created.'}`,
-            crmId: leadId,
+            success: false,
+            alreadyExists: true,
+            message: `Opportunity already exists in Odoo CRM (ID: ${existingLead.id})`,
+            crmId: existingLead.id,
             crmType: 'odoo',
+            opportunityName: existingLead.name,
+            stage: existingLead.stage_id?.[1] || 'Unknown',
             details: {
-              companyCreated: !isExistingCompany,
-              contactCreated: !contactAlreadyExists,
+              companyCreated: false,
+              contactCreated: false,
               leadCreated: false,
-              clientType: clientType
+              rolledBack: createdRecords.company || createdRecords.contact ? true : false
             }
           });
         }
@@ -442,7 +517,8 @@ async function startServer() {
           [leadCreateData]
         ]);
 
-        leadId = Array.isArray(leadResult) ? leadResult[0] : leadResult;
+        const leadId = Array.isArray(leadResult) ? leadResult[0] : leadResult;
+        createdRecords.opportunity = leadId; // Track for rollback
         console.log('Opportunity created. ID:', leadId);
 
         await exportLogs.insertOne({
@@ -478,6 +554,15 @@ async function startServer() {
           }
         });
 
+      } catch (creationError) {
+        console.error('Error during Odoo record creation:', creationError);
+        
+        // Rollback any created records
+        await rollbackCreatedRecords(callOdoo, createdRecords);
+        
+        throw creationError; // Re-throw to be caught by outer catch
+      }
+
       } catch (error) {
         console.error('Odoo export error:', error);
         
@@ -494,15 +579,16 @@ async function startServer() {
 
         res.status(500).json({
           success: false,
-          error: error.message || 'Failed to export to Odoo CRM'
+          error: error.message || 'Failed to export to Odoo CRM',
+          message: 'Export failed. Any partially created records have been rolled back.'
         });
       }
     });
 
-    // Check if already exported
+    // Check if already exported - UPDATED to verify in Odoo
     app.get('/api/crm/check-export', async (req, res) => {
       try {
-        const { url, userEmail } = req.query;
+        const { url, userEmail, crmConfig } = req.query;
 
         if (!url || !userEmail) {
           return res.status(400).json({ 
@@ -511,6 +597,7 @@ async function startServer() {
           });
         }
 
+        // First check MongoDB logs
         const existingExport = await exportLogs.findOne({
           linkedinUrl: url,
           exportedBy: userEmail,
@@ -518,16 +605,144 @@ async function startServer() {
           crmType: 'odoo'
         });
 
-        if (existingExport) {
+        // If not in MongoDB, definitely not exported
+        if (!existingExport) {
+          return res.json({ alreadyExported: false });
+        }
+
+        // ✅ IMPORTANT: Verify the record still exists in Odoo
+        // (In case it was manually deleted from Odoo)
+        
+        // If no CRM config provided, can't verify in Odoo
+        if (!crmConfig) {
+          console.warn('No CRM config provided, cannot verify in Odoo');
           return res.json({
             alreadyExported: true,
             exportedAt: existingExport.exportedAt,
             crmId: existingExport.crmId,
-            crmType: existingExport.crmType
+            crmType: existingExport.crmType,
+            verified: false
           });
         }
 
-        res.json({ alreadyExported: false });
+        try {
+          // Parse CRM config
+          const config = JSON.parse(crmConfig);
+          
+          if (!config.endpointUrl || !config.username || !config.password || !config.databaseName) {
+            throw new Error('Incomplete CRM config');
+          }
+
+          // Authenticate with Odoo
+          const authUrl = `${config.endpointUrl}/web/session/authenticate`;
+          const authResponse = await fetch(authUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              params: {
+                db: config.databaseName,
+                login: config.username,
+                password: config.password
+              }
+            })
+          });
+
+          if (!authResponse.ok) {
+            throw new Error('Odoo authentication failed');
+          }
+
+          const setCookieHeader = authResponse.headers.get('set-cookie');
+          let cookies = '';
+          if (setCookieHeader) {
+            cookies = setCookieHeader.split(',').map(c => c.trim().split(';')[0]).join('; ');
+          }
+
+          const authResult = await authResponse.json();
+          if (!authResult.result?.uid) {
+            throw new Error('Invalid Odoo credentials');
+          }
+
+          const userId = authResult.result.uid;
+          const sessionId = authResult.result.session_id;
+          if (!cookies && sessionId) cookies = `session_id=${sessionId}`;
+
+          const odooUrl = `${config.endpointUrl}/jsonrpc`;
+
+          // Check if the opportunity still exists in Odoo by ID
+          const checkResponse = await fetch(odooUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Cookie': cookies
+            },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              method: "call",
+              params: {
+                service: "object",
+                method: "execute_kw",
+                args: [
+                  config.databaseName,
+                  userId,
+                  config.password,
+                  'crm.lead',
+                  'search_read',
+                  [[['id', '=', existingExport.crmId]]],
+                  ['id', 'name', 'active']
+                ]
+              },
+              id: Date.now()
+            })
+          });
+
+          if (!checkResponse.ok) {
+            console.warn('Failed to check Odoo, assuming exists');
+            // If we can't check Odoo, return based on MongoDB
+            return res.json({
+              alreadyExported: true,
+              exportedAt: existingExport.exportedAt,
+              crmId: existingExport.crmId,
+              crmType: existingExport.crmType,
+              verified: false
+            });
+          }
+
+          const checkResult = await checkResponse.json();
+          const opportunities = checkResult.result || [];
+
+          // If opportunity doesn't exist in Odoo (was deleted)
+          if (opportunities.length === 0) {
+            console.log(`Opportunity ${existingExport.crmId} not found in Odoo (was deleted manually)`);
+            
+            // ✅ Don't clean up MongoDB - just return that it doesn't exist in Odoo
+            return res.json({ 
+              alreadyExported: false,
+              wasDeleted: true,
+              mongoDbHasLog: true // MongoDB still has the log
+            });
+          }
+
+          // Opportunity exists in Odoo
+          return res.json({
+            alreadyExported: true,
+            exportedAt: existingExport.exportedAt,
+            crmId: existingExport.crmId,
+            crmType: existingExport.crmType,
+            verified: true
+          });
+
+        } catch (odooError) {
+          console.warn('Error verifying in Odoo:', odooError.message);
+          // If verification fails, return based on MongoDB
+          return res.json({
+            alreadyExported: true,
+            exportedAt: existingExport.exportedAt,
+            crmId: existingExport.crmId,
+            crmType: existingExport.crmType,
+            verified: false
+          });
+        }
 
       } catch (error) {
         console.error('Export check error:', error);
