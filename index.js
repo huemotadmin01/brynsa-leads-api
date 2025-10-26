@@ -310,18 +310,59 @@ async function startServer() {
             const email = (leadData.email || '').trim();
             const cleanEmail = (email && isValidEmail(email) && email !== 'No email found') ? email : null;
 
-            // ✅ 3.1 Duplicate Check - Check if candidate already exists
-            const existingCandidates = await callOdoo('hr.candidate', 'search_read', [
+            // ✅ 3.1 IMPROVED Duplicate Check - Check if candidate already exists
+            // Using similar logic to opportunity duplicate check:
+            // - Check by name + email
+            // - Check by LinkedIn URL
+            // - Merge results and deduplicate
+            
+            console.log('🔍 Checking for duplicate candidates...');
+            
+            // Check 1: By name + email (existing logic)
+            const candidatesByName = await callOdoo('hr.candidate', 'search_read', [
               [
                 ['partner_name', '=', cleanName],
                 ...(cleanEmail ? [['email_from', '=', cleanEmail]] : [])
               ],
-              ['id', 'partner_name', 'email_from']  // Removed stage_id - not part of hr.candidate model
+              ['id', 'partner_name', 'email_from', 'linkedin_profile']
             ]);
+            
+            console.log(`Found ${candidatesByName?.length || 0} candidates by name/email`);
 
-            if (existingCandidates && existingCandidates.length > 0) {
-              const existing = existingCandidates[0];
-              console.log('Duplicate candidate found in Odoo:', existing);
+            // Check 2: By LinkedIn URL (NEW - similar to opportunity check)
+            let candidatesByLinkedIn = [];
+            if (linkedinUrl) {
+              candidatesByLinkedIn = await callOdoo('hr.candidate', 'search_read', [
+                [['linkedin_profile', '=', linkedinUrl]],
+                ['id', 'partner_name', 'email_from', 'linkedin_profile']
+              ]);
+              
+              console.log(`Found ${candidatesByLinkedIn?.length || 0} candidates by LinkedIn URL`);
+            }
+
+            // Merge results and deduplicate (same logic as opportunity)
+            const allExistingCandidates = [
+              ...(candidatesByName || []), 
+              ...(candidatesByLinkedIn || [])
+            ];
+            
+            const uniqueCandidates = allExistingCandidates.filter((candidate, index, self) =>
+              index === self.findIndex(c => c.id === candidate.id)
+            );
+
+            if (uniqueCandidates && uniqueCandidates.length > 0) {
+              const existing = uniqueCandidates[0];
+              
+              // Determine how the duplicate was found
+              const matchedByLinkedIn = candidatesByLinkedIn.some(c => c.id === existing.id);
+              const matchedBy = matchedByLinkedIn ? 'LinkedIn URL' : 'Name/Email';
+              
+              console.log(`✋ Duplicate candidate found by ${matchedBy}:`, {
+                id: existing.id,
+                name: existing.partner_name,
+                email: existing.email_from,
+                linkedin: existing.linkedin_profile
+              });
 
               await exportLogs.insertOne({
                 leadName: cleanName,
@@ -333,19 +374,21 @@ async function startServer() {
                 exportedAt: new Date(),
                 status: 'duplicate',
                 profileType: 'candidate',
-                message: 'Candidate already exists in Odoo'
+                message: `Candidate already exists in Odoo (matched by ${matchedBy})`
               });
 
               return res.json({
                 success: false,
                 alreadyExists: true,
-                message: 'Candidate already exists in Odoo',
+                message: `Candidate already exists in Odoo (matched by ${matchedBy})`,
                 crmId: existing.id,
                 crmType: 'odoo',
-                candidateName: existing.partner_name
-                // Removed stage field - stage_id doesn't exist in hr.candidate model
+                candidateName: existing.partner_name,
+                matchedBy: matchedBy
               });
             }
+            
+            console.log('✅ No duplicate candidate found, proceeding to create...');
 
             // ✅ 3.2 Create contact (partner)
             console.log('Creating contact for candidate...');
@@ -374,10 +417,15 @@ async function startServer() {
             // and sends it in the request payload as 'extractedSkill'.
             let mainSkill = extractedSkill || null;
             
+            console.log('🔍 Skill extraction debug:');
+            console.log('  - extractedSkill from request:', extractedSkill);
+            console.log('  - mainSkill value:', mainSkill);
+            console.log('  - headline from leadData:', leadData.function || leadData.headline);
+            
             if (mainSkill) {
               console.log(`✅ Using skill extracted by extension: ${mainSkill}`);
             } else {
-              console.log('⚠️ No skill provided by extension');
+              console.log('⚠️ No skill provided by extension - skill creation will be skipped');
             }
 
             // ✅ 3.4 Create candidate record
@@ -387,7 +435,8 @@ async function startServer() {
               partner_name: cleanName,
               partner_id: parseInt(contactId, 10),
               email_from: cleanEmail || 'noemail@domain.com',
-              company_id: 1 // Hardcoded to "HUEMOT TECHNOLOGY PRIVATE LIMITED" (ID: 1 in most Odoo instances)
+              company_id: 1, // Hardcoded to "HUEMOT TECHNOLOGY PRIVATE LIMITED" (ID: 1 in most Odoo instances)
+              linkedin_profile: linkedinUrl // LinkedIn profile URL
               // Note: 'name' and 'description' fields removed - auto-generated/managed by Odoo
             };
 
@@ -452,22 +501,23 @@ async function startServer() {
                   console.log(`Created skill: ${mainSkill} (ID: ${skillId})`);
                 }
 
-                // Find skill level "100%" or create it
+                // Find skill level "Expert (100%)" - the actual level name in Odoo
                 let skillLevelId = null;
                 const skillLevels = await callOdoo('hr.skill.level', 'search_read', [
-                  [['name', '=', '100%']],
+                  [['name', 'ilike', '100%']],  // Using 'ilike' to match any level containing "100%"
                   ['id', 'name']
                 ]);
                 
                 if (skillLevels && skillLevels.length > 0) {
                   skillLevelId = skillLevels[0].id;
-                  console.log(`Found existing skill level: 100% (ID: ${skillLevelId})`);
+                  console.log(`Found existing skill level: ${skillLevels[0].name} (ID: ${skillLevelId})`);
                 } else {
+                  console.log('⚠️ No skill level found with "100%" - trying to create "Expert (100%)"');
                   const levelResult = await callOdoo('hr.skill.level', 'create', [[
-                    { name: '100%', level_progress: 100 }
+                    { name: 'Expert (100%)', level_progress: 100 }
                   ]]);
                   skillLevelId = Array.isArray(levelResult) ? levelResult[0] : levelResult;
-                  console.log(`Created skill level: 100% (ID: ${skillLevelId})`);
+                  console.log(`Created skill level: Expert (100%) (ID: ${skillLevelId})`);
                 }
 
                 // ✅ CHECK DUPLICATE: Check if this candidate-skill combination already exists
