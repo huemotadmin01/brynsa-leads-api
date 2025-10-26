@@ -31,7 +31,7 @@ async function startServer() {
     await exportLogs.createIndex({ linkedinUrl: 1, exportedBy: 1 });
     await exportLogs.createIndex({ leadId: 1, crmType: 1 });
 
-    // ------------------ LOOKUP BY LINKEDIN URL ------------------
+    // ------------------ EXISTING ENDPOINTS (UNCHANGED) ------------------
     app.get('/api/leads/lookup', async (req, res) => {
       try {
         const { linkedinUrl } = req.query;
@@ -57,7 +57,6 @@ async function startServer() {
       }
     });
 
-    // ------------------ UPSERT EMAIL WHEN PLACEHOLDER ------------------
     app.put('/api/leads/upsert-email', async (req, res) => {
       try {
         const { linkedinUrl, email } = req.body || {};
@@ -85,7 +84,6 @@ async function startServer() {
       }
     });
 
-    // ------------------ INSERT LEAD ------------------
     app.post('/api/leads', async (req, res) => {
       try {
         const lead = req.body;
@@ -107,23 +105,27 @@ async function startServer() {
       }
     });
 
-    // ========== ODOO CRM EXPORT ==========
+    // ========== ENHANCED ODOO CRM EXPORT WITH CLIENT & CANDIDATE SUPPORT ==========
 
     // Helper function to rollback created records
     async function rollbackCreatedRecords(callOdoo, createdRecords) {
       const rollbackResults = [];
       
       try {
-        // Delete in reverse order: opportunity -> contact -> company
-        if (createdRecords.opportunity) {
-          console.log('Rolling back opportunity:', createdRecords.opportunity);
+        // Delete in reverse order: opportunity/candidate -> contact -> company/skill
+        if (createdRecords.opportunity || createdRecords.candidate) {
+          const entityType = createdRecords.opportunity ? 'opportunity' : 'candidate';
+          const entityId = createdRecords.opportunity || createdRecords.candidate;
+          const modelName = createdRecords.opportunity ? 'crm.lead' : 'hr.applicant';
+          
+          console.log(`Rolling back ${entityType}:`, entityId);
           try {
-            await callOdoo('crm.lead', 'unlink', [[createdRecords.opportunity]]);
-            rollbackResults.push({ type: 'opportunity', id: createdRecords.opportunity, status: 'deleted' });
-            console.log('✅ Opportunity rolled back');
+            await callOdoo(modelName, 'unlink', [[entityId]]);
+            rollbackResults.push({ type: entityType, id: entityId, status: 'deleted' });
+            console.log(`✅ ${entityType} rolled back`);
           } catch (err) {
-            console.error('❌ Failed to rollback opportunity:', err.message);
-            rollbackResults.push({ type: 'opportunity', id: createdRecords.opportunity, status: 'failed', error: err.message });
+            console.error(`❌ Failed to rollback ${entityType}:`, err.message);
+            rollbackResults.push({ type: entityType, id: entityId, status: 'failed', error: err.message });
           }
         }
 
@@ -150,6 +152,18 @@ async function startServer() {
             rollbackResults.push({ type: 'company', id: createdRecords.company, status: 'failed', error: err.message });
           }
         }
+
+        if (createdRecords.skill) {
+          console.log('Rolling back skill:', createdRecords.skill);
+          try {
+            await callOdoo('hr.candidate.skill', 'unlink', [[createdRecords.skill]]);
+            rollbackResults.push({ type: 'skill', id: createdRecords.skill, status: 'deleted' });
+            console.log('✅ Skill rolled back');
+          } catch (err) {
+            console.error('❌ Failed to rollback skill:', err.message);
+            rollbackResults.push({ type: 'skill', id: createdRecords.skill, status: 'failed', error: err.message });
+          }
+        }
       } catch (err) {
         console.error('❌ Rollback process error:', err.message);
       }
@@ -157,12 +171,17 @@ async function startServer() {
       return rollbackResults;
     }
 
+    // ✅ UNIFIED ODOO EXPORT ENDPOINT (handles both Client and Candidate)
     app.post('/api/crm/export-odoo', async (req, res) => {
       try {
-        const { leadData, crmConfig, userEmail, linkedinUrl } = req.body;
+        const { leadData, crmConfig, userEmail, linkedinUrl, profileType, extractedSkill } = req.body;
 
         if (!leadData || !leadData.name) {
           return res.status(400).json({ error: 'Lead data with name is required' });
+        }
+
+        if (!profileType || !['client', 'candidate'].includes(profileType.toLowerCase())) {
+          return res.status(400).json({ error: 'Valid profileType (client or candidate) is required' });
         }
 
         const cleanName = (leadData.name || '').trim();
@@ -173,7 +192,7 @@ async function startServer() {
           });
         }
 
-        // Extract company name from comment if not provided
+        // Extract company name
         let cleanCompany = (leadData.companyName || leadData.company || '').trim();
         if (!cleanCompany && leadData.comment) {
           const commentMatch = leadData.comment.match(/Company:\s*(.+)/);
@@ -182,7 +201,7 @@ async function startServer() {
           }
         }
 
-        // Extract sourcedBy from comment if not provided
+        // Extract sourcedBy
         let sourcedBy = leadData.sourcedBy;
         if (!sourcedBy && leadData.comment) {
           const sourcedByMatch = leadData.comment.match(/Sourced by:\s*(.+)/);
@@ -203,7 +222,10 @@ async function startServer() {
           return res.status(400).json({ error: 'CRM configuration is incomplete' });
         }
 
-        console.log('Odoo export:', { lead: cleanName, company: cleanCompany, sourcedBy, linkedinUrl });
+        const isCandidate = profileType.toLowerCase() === 'candidate';
+        const entityType = isCandidate ? 'candidate' : 'client';
+        
+        console.log(`Odoo export (${entityType}):`, { lead: cleanName, company: cleanCompany, sourcedBy, linkedinUrl });
 
         // Authenticate
         const authUrl = `${crmConfig.endpointUrl}/web/session/authenticate`;
@@ -273,295 +295,528 @@ async function startServer() {
           return result.result;
         }
 
-        // Get LinkedIn source
-        let linkedinSourceId = null;
-        const sources = await callOdoo('utm.source', 'search_read', [
-          [['name', '=', 'LinkedIn']],
-          ['id', 'name']
-        ]);
-        
-        if (sources && sources.length > 0) {
-          linkedinSourceId = sources[0].id;
-        } else {
-          linkedinSourceId = await callOdoo('utm.source', 'create', [
-            [{ name: 'LinkedIn' }]
-          ]);
-        }
-
-        // Find salesperson
-        let salespersonId = null;
-        if (sourcedBy) {
-          const salespersons = await callOdoo('res.users', 'search_read', [
-            [['name', 'ilike', sourcedBy]],
-            ['id', 'name']
-          ]);
-          
-          if (salespersons && salespersons.length > 0) {
-            salespersonId = salespersons[0].id;
-          } else {
-            salespersonId = userId;
-          }
-        } else {
-          salespersonId = userId;
-        }
-
         // Track created records for rollback
         const createdRecords = {
           company: null,
           contact: null,
-          opportunity: null
+          opportunity: null,
+          candidate: null,
+          skill: null
         };
 
         try {
-          // Check company
-          const existingCompanies = await callOdoo('res.partner', 'search_read', [
-            [['name', '=', cleanCompany], ['is_company', '=', true]],
-            ['id', 'name']
-          ]);
+          // ========== CANDIDATE FLOW ==========
+          if (isCandidate) {
+            const email = (leadData.email || '').trim();
+            const cleanEmail = (email && isValidEmail(email) && email !== 'No email found') ? email : null;
 
-          let companyId;
-          let isExistingCompany = false;
-          let clientType;
+            // ✅ 3.1 Duplicate Check - Check if candidate already exists
+            const existingCandidates = await callOdoo('hr.applicant', 'search_read', [
+              [
+                ['partner_name', '=', cleanName],
+                ...(cleanEmail ? [['email_from', '=', cleanEmail]] : [])
+              ],
+              ['id', 'partner_name', 'email_from', 'stage_id']
+            ]);
 
-          if (existingCompanies && existingCompanies.length > 0) {
-            companyId = existingCompanies[0].id;
-            isExistingCompany = true;
-            clientType = 'Existing Client';
-            console.log('Company exists. ID:', companyId, 'Client Type:', clientType);
+            if (existingCandidates && existingCandidates.length > 0) {
+              const existing = existingCandidates[0];
+              console.log('Duplicate candidate found in Odoo:', existing);
+
+              await exportLogs.insertOne({
+                leadName: cleanName,
+                leadEmail: cleanEmail,
+                linkedinUrl: linkedinUrl,
+                crmType: 'odoo',
+                crmId: existing.id,
+                exportedBy: userEmail,
+                exportedAt: new Date(),
+                status: 'duplicate',
+                profileType: 'candidate',
+                message: 'Candidate already exists in Odoo'
+              });
+
+              return res.json({
+                success: false,
+                alreadyExists: true,
+                message: 'Candidate already exists in Odoo',
+                crmId: existing.id,
+                crmType: 'odoo',
+                candidateName: existing.partner_name,
+                stage: existing.stage_id?.[1] || 'Unknown'
+              });
+            }
+
+            // ✅ 3.2 Create contact (partner)
+            console.log('Creating contact for candidate...');
+            
+            const contactData = {
+              name: cleanName,
+              type: 'contact',
+              is_company: false,
+              customer_rank: 0
+            };
+
+            if (cleanEmail) contactData.email = cleanEmail;
+
+            const phone = (leadData.phone || '').trim();
+            if (phone) contactData.phone = phone;
+
+            const contactResult = await callOdoo('res.partner', 'create', [[contactData]]);
+            const contactId = Array.isArray(contactResult) ? contactResult[0] : contactResult;
+            createdRecords.contact = contactId;
+            console.log('Contact created. ID:', contactId);
+
+            // ✅ 3.3 Get extracted skill from request (already extracted by extension)
+            // IMPORTANT: Skill extraction is now done in the browser extension (background.js)
+            // before the export to CRM button is clicked. This happens ONLY for candidates.
+            // The extension calls OpenAI API to extract the main IT skill from the headline,
+            // and sends it in the request payload as 'extractedSkill'.
+            let mainSkill = extractedSkill || null;
+            
+            if (mainSkill) {
+              console.log(`✅ Using skill extracted by extension: ${mainSkill}`);
+            } else {
+              console.log('⚠️ No skill provided by extension');
+            }
+
+            // ✅ 3.4 Create candidate record
+            console.log('Creating candidate...');
+            
+            const candidateData = {
+              partner_name: cleanName,
+              partner_id: parseInt(contactId, 10),
+              email_from: cleanEmail || 'noemail@domain.com',
+              company_id: 1, // Hardcoded to "HUEMOT TECHNOLOGY PRIVATE LIMITED" (ID: 1 in most Odoo instances)
+              name: `Application - ${cleanName}`,
+              description: leadData.comment || `LinkedIn: ${linkedinUrl}`
+            };
+
+            // Find salesperson
+            if (sourcedBy) {
+              const salespersons = await callOdoo('res.users', 'search_read', [
+                [['name', 'ilike', sourcedBy]],
+                ['id', 'name']
+              ]);
+              
+              if (salespersons && salespersons.length > 0) {
+                candidateData.user_id = salespersons[0].id;
+              } else {
+                candidateData.user_id = userId;
+              }
+            } else {
+              candidateData.user_id = userId;
+            }
+
+            const candidateResult = await callOdoo('hr.applicant', 'create', [[candidateData]]);
+            const candidateId = Array.isArray(candidateResult) ? candidateResult[0] : candidateResult;
+            createdRecords.candidate = candidateId;
+            console.log('Candidate created. ID:', candidateId);
+
+            // ✅ 3.5 Create skill record if main skill extracted
+            if (mainSkill) {
+              console.log('Creating skill:', mainSkill);
+              
+              try {
+                // Find or create skill_type_id for "IT"
+                let itSkillTypeId = null;
+                const skillTypes = await callOdoo('hr.skill.type', 'search_read', [
+                  [['name', '=', 'IT']],
+                  ['id', 'name']
+                ]);
+                
+                if (skillTypes && skillTypes.length > 0) {
+                  itSkillTypeId = skillTypes[0].id;
+                  console.log(`Found existing IT skill type: ${itSkillTypeId}`);
+                } else {
+                  // Create IT skill type if doesn't exist
+                  const skillTypeResult = await callOdoo('hr.skill.type', 'create', [[{ name: 'IT' }]]);
+                  itSkillTypeId = Array.isArray(skillTypeResult) ? skillTypeResult[0] : skillTypeResult;
+                  console.log(`Created IT skill type: ${itSkillTypeId}`);
+                }
+
+                // Find or create the skill itself
+                let skillId = null;
+                const skills = await callOdoo('hr.skill', 'search_read', [
+                  [['name', '=', mainSkill], ['skill_type_id', '=', itSkillTypeId]],
+                  ['id', 'name']
+                ]);
+                
+                if (skills && skills.length > 0) {
+                  skillId = skills[0].id;
+                  console.log(`Found existing skill: ${mainSkill} (ID: ${skillId})`);
+                } else {
+                  const skillResult = await callOdoo('hr.skill', 'create', [[
+                    { name: mainSkill, skill_type_id: itSkillTypeId }
+                  ]]);
+                  skillId = Array.isArray(skillResult) ? skillResult[0] : skillResult;
+                  console.log(`Created skill: ${mainSkill} (ID: ${skillId})`);
+                }
+
+                // Find skill level "100%" or create it
+                let skillLevelId = null;
+                const skillLevels = await callOdoo('hr.skill.level', 'search_read', [
+                  [['name', '=', '100%']],
+                  ['id', 'name']
+                ]);
+                
+                if (skillLevels && skillLevels.length > 0) {
+                  skillLevelId = skillLevels[0].id;
+                  console.log(`Found existing skill level: 100% (ID: ${skillLevelId})`);
+                } else {
+                  const levelResult = await callOdoo('hr.skill.level', 'create', [[
+                    { name: '100%', level_progress: 100 }
+                  ]]);
+                  skillLevelId = Array.isArray(levelResult) ? levelResult[0] : levelResult;
+                  console.log(`Created skill level: 100% (ID: ${skillLevelId})`);
+                }
+
+                // ✅ CHECK DUPLICATE: Check if this candidate-skill combination already exists
+                const existingCandidateSkills = await callOdoo('hr.candidate.skill', 'search_read', [
+                  [
+                    ['candidate_id', '=', candidateId],
+                    ['skill_id', '=', skillId]
+                  ],
+                  ['id', 'skill_id', 'skill_level_id']
+                ]);
+
+                if (existingCandidateSkills && existingCandidateSkills.length > 0) {
+                  console.log(`⚠️ Skill already linked to candidate, skipping creation`);
+                } else {
+                  // ✅ Create candidate skill record using hr.candidate.skill model
+                  const candidateSkillData = {
+                    candidate_id: candidateId,
+                    skill_id: skillId,
+                    skill_level_id: skillLevelId,
+                    skill_type_id: itSkillTypeId
+                  };
+
+                  console.log('Creating candidate skill with data:', candidateSkillData);
+                  
+                  const candidateSkillResult = await callOdoo('hr.candidate.skill', 'create', [[candidateSkillData]]);
+                  const candidateSkillId = Array.isArray(candidateSkillResult) ? candidateSkillResult[0] : candidateSkillResult;
+                  createdRecords.skill = candidateSkillId;
+                  console.log('✅ Candidate skill created. ID:', candidateSkillId);
+                }
+              } catch (skillError) {
+                console.error('❌ Failed to create skill:', skillError.message);
+                console.error('Stack:', skillError.stack);
+                // Don't fail the entire export if skill creation fails
+                // But log it for monitoring
+                console.warn('⚠️ Continuing without skill, but candidate was created');
+              }
+            } else {
+              console.log('⚠️ No skill extracted from headline, skipping skill creation');
+            }
+
+            // Log successful export
+            await exportLogs.insertOne({
+              leadName: cleanName,
+              leadEmail: cleanEmail,
+              linkedinUrl: linkedinUrl,
+              crmType: 'odoo',
+              crmId: candidateId,
+              contactId: contactId,
+              exportedBy: userEmail,
+              exportedAt: new Date(),
+              status: 'success',
+              profileType: 'candidate',
+              mainSkill: mainSkill || 'Not extracted'
+            });
+
+            return res.json({
+              success: true,
+              message: `Successfully exported candidate to Odoo CRM`,
+              crmId: candidateId,
+              crmType: 'odoo',
+              profileType: 'candidate',
+              details: {
+                contactCreated: true,
+                candidateCreated: true,
+                skillExtracted: mainSkill || 'None',
+                contactId: contactId
+              }
+            });
+
           } else {
-            console.log('Creating company...');
-            const companyResult = await callOdoo('res.partner', 'create', [
-              [{
-                name: cleanCompany,
-                is_company: true,
-                customer_rank: 1,
-                user_id: salespersonId
-              }]
+            // ========== CLIENT FLOW (EXISTING LOGIC - NO CHANGE) ==========
+            
+            // Get LinkedIn source
+            let linkedinSourceId = null;
+            const sources = await callOdoo('utm.source', 'search_read', [
+              [['name', '=', 'LinkedIn']],
+              ['id', 'name']
             ]);
             
-            companyId = Array.isArray(companyResult) ? companyResult[0] : companyResult;
-            isExistingCompany = false;
-            clientType = 'New Prospect';
-            createdRecords.company = companyId; // Track for rollback
-            console.log('Company created. ID:', companyId, 'Client Type:', clientType);
-          }
-
-        // Check contact
-        const existingContacts = await callOdoo('res.partner', 'search_read', [
-          [['name', '=', cleanName], ['parent_id', '=', companyId]],
-          ['id', 'name', 'email']
-        ]);
-
-        let contactId;
-        let contactAlreadyExists = false;
-
-        if (existingContacts && existingContacts.length > 0) {
-          contactId = existingContacts[0].id;
-          contactAlreadyExists = true;
-          console.log('Contact exists. ID:', contactId);
-        } else {
-          console.log('Creating contact...');
-          
-          const contactData = {
-            name: cleanName,
-            parent_id: parseInt(companyId, 10),
-            type: 'contact',
-            is_company: false,
-            customer_rank: 1
-          };
-
-          const email = (leadData.email || '').trim();
-          if (email && isValidEmail(email) && email !== 'No email found') {
-            contactData.email = email;
-          } else {
-            contactData.email = 'noemail@domain.com';
-          }
-
-          const phone = (leadData.phone || '').trim();
-          if (phone) contactData.phone = phone;
-
-          const func = (leadData.function || '').trim();
-          if (func) contactData.function = func;
-
-          const street = (leadData.street || '').trim();
-          if (street) contactData.street = street;
-
-          const comment = (leadData.comment || '').trim();
-          if (comment) contactData.comment = comment;
-
-          console.log('Contact data:', contactData);
-          
-          const contactResult = await callOdoo('res.partner', 'create', [
-            [contactData]
-          ]);
-          
-          contactId = Array.isArray(contactResult) ? contactResult[0] : contactResult;
-          createdRecords.contact = contactId; // Track for rollback
-          console.log('Contact created. ID:', contactId);
-        }
-
-        // ✅ CHECK FOR DUPLICATE OPPORTUNITIES IN ODOO (not archived)
-        // Check by contact (partner_id)
-        const existingLeadsByContact = await callOdoo('crm.lead', 'search_read', [
-          [
-            ['partner_id', '=', contactId],
-            ['active', '=', true] // Excludes archived records
-          ],
-          ['id', 'name', 'stage_id', 'probability']
-        ]);
-
-        // Also check by LinkedIn URL in website field (more specific check)
-        let existingLeadsByLinkedIn = [];
-        if (linkedinUrl) {
-          existingLeadsByLinkedIn = await callOdoo('crm.lead', 'search_read', [
-            [
-              ['website', '=', linkedinUrl],
-              ['active', '=', true]
-            ],
-            ['id', 'name', 'stage_id', 'probability', 'partner_id']
-          ]);
-        }
-
-        // Combine both checks
-        const allExistingLeads = [...existingLeadsByContact, ...existingLeadsByLinkedIn];
-        
-        // Remove duplicates by ID
-        const uniqueLeads = allExistingLeads.filter((lead, index, self) =>
-          index === self.findIndex(l => l.id === lead.id)
-        );
-
-        if (uniqueLeads && uniqueLeads.length > 0) {
-          const existingLead = uniqueLeads[0];
-          
-          console.log('Duplicate opportunity found in Odoo:', {
-            id: existingLead.id,
-            name: existingLead.name,
-            stage: existingLead.stage_id?.[1] || 'Unknown',
-            probability: existingLead.probability
-          });
-
-          // Rollback any created records
-          await rollbackCreatedRecords(callOdoo, createdRecords);
-
-          // Log to MongoDB for tracking
-          await exportLogs.insertOne({
-            leadName: cleanName,
-            leadEmail: leadData.email,
-            linkedinUrl: linkedinUrl,
-            crmType: 'odoo',
-            crmId: existingLead.id,
-            exportedBy: userEmail,
-            exportedAt: new Date(),
-            status: 'duplicate',
-            message: 'Opportunity already exists in Odoo',
-            companyId: companyId,
-            contactId: contactId
-          });
-
-          return res.json({
-            success: false,
-            alreadyExists: true,
-            message: `Opportunity already exists in Odoo CRM (ID: ${existingLead.id})`,
-            crmId: existingLead.id,
-            crmType: 'odoo',
-            opportunityName: existingLead.name,
-            stage: existingLead.stage_id?.[1] || 'Unknown',
-            details: {
-              companyCreated: false,
-              contactCreated: false,
-              leadCreated: false,
-              rolledBack: createdRecords.company || createdRecords.contact ? true : false
+            if (sources && sources.length > 0) {
+              linkedinSourceId = sources[0].id;
+            } else {
+              linkedinSourceId = await callOdoo('utm.source', 'create', [
+                [{ name: 'LinkedIn' }]
+              ]);
             }
-          });
-        }
 
-        // Create lead/opportunity
-        const leadCreateData = {
-          name: `${cleanName}'s opportunity`,
-          partner_id: parseInt(contactId, 10),
-          contact_name: cleanName,
-          type: 'opportunity',
-          user_id: salespersonId,
-          source_id: linkedinSourceId,
-          x_studio_client_type: clientType
-        };
+            // Find salesperson
+            let salespersonId = null;
+            if (sourcedBy) {
+              const salespersons = await callOdoo('res.users', 'search_read', [
+                [['name', 'ilike', sourcedBy]],
+                ['id', 'name']
+              ]);
+              
+              if (salespersons && salespersons.length > 0) {
+                salespersonId = salespersons[0].id;
+              } else {
+                salespersonId = userId;
+              }
+            } else {
+              salespersonId = userId;
+            }
 
-        const emailFrom = (leadData.email || '').trim();
-        if (emailFrom && isValidEmail(emailFrom) && emailFrom !== 'No email found') {
-          leadCreateData.email_from = emailFrom;
-        } else {
-          leadCreateData.email_from = 'noemail@domain.com';
-        }
+            // Check company
+            const existingCompanies = await callOdoo('res.partner', 'search_read', [
+              [['name', '=', cleanCompany], ['is_company', '=', true]],
+              ['id', 'name']
+            ]);
 
-        const phone = (leadData.phone || '').trim();
-        if (phone) leadCreateData.phone = phone;
+            let companyId;
+            let isExistingCompany = false;
+            let clientType;
 
-        const func = (leadData.function || '').trim();
-        if (func) leadCreateData.function = func;
+            if (existingCompanies && existingCompanies.length > 0) {
+              companyId = existingCompanies[0].id;
+              isExistingCompany = true;
+              clientType = 'Existing Client';
+              console.log('Company exists. ID:', companyId, 'Client Type:', clientType);
+            } else {
+              console.log('Creating company...');
+              const companyResult = await callOdoo('res.partner', 'create', [
+                [{
+                  name: cleanCompany,
+                  is_company: true,
+                  customer_rank: 1,
+                  user_id: salespersonId
+                }]
+              ]);
+              
+              companyId = Array.isArray(companyResult) ? companyResult[0] : companyResult;
+              isExistingCompany = false;
+              clientType = 'New Prospect';
+              createdRecords.company = companyId;
+              console.log('Company created. ID:', companyId, 'Client Type:', clientType);
+            }
 
-        const street = (leadData.street || '').trim();
-        if (street) leadCreateData.street = street;
+            // Check contact
+            const existingContacts = await callOdoo('res.partner', 'search_read', [
+              [['name', '=', cleanName], ['parent_id', '=', companyId]],
+              ['id', 'name', 'email']
+            ]);
 
-        // ✅ UPDATED: Add LinkedIn URL to website field instead of description
-        if (linkedinUrl) {
-          leadCreateData.website = linkedinUrl;
-        }
+            let contactId;
+            let contactAlreadyExists = false;
 
-        console.log('Creating opportunity with data:', { 
-          clientType, 
-          isExistingCompany, 
-          website: linkedinUrl 
-        });
+            if (existingContacts && existingContacts.length > 0) {
+              contactId = existingContacts[0].id;
+              contactAlreadyExists = true;
+              console.log('Contact exists. ID:', contactId);
+            } else {
+              console.log('Creating contact...');
+              
+              const contactData = {
+                name: cleanName,
+                parent_id: parseInt(companyId, 10),
+                type: 'contact',
+                is_company: false,
+                customer_rank: 1
+              };
 
-        const leadResult = await callOdoo('crm.lead', 'create', [
-          [leadCreateData]
-        ]);
+              const email = (leadData.email || '').trim();
+              if (email && isValidEmail(email) && email !== 'No email found') {
+                contactData.email = email;
+              } else {
+                contactData.email = 'noemail@domain.com';
+              }
 
-        const leadId = Array.isArray(leadResult) ? leadResult[0] : leadResult;
-        createdRecords.opportunity = leadId; // Track for rollback
-        console.log('Opportunity created. ID:', leadId);
+              const phone = (leadData.phone || '').trim();
+              if (phone) contactData.phone = phone;
 
-        await exportLogs.insertOne({
-          leadName: cleanName,
-          leadEmail: leadData.email,
-          linkedinUrl: linkedinUrl,
-          crmType: 'odoo',
-          crmId: leadId,
-          companyId: companyId,
-          contactId: contactId,
-          exportedBy: userEmail,
-          exportedAt: new Date(),
-          status: 'success',
-          clientType: clientType,
-          salespersonId: salespersonId,
-          sourceId: linkedinSourceId
-        });
+              const func = (leadData.function || '').trim();
+              if (func) contactData.function = func;
 
-        res.json({
-          success: true,
-          message: `Successfully exported to Odoo CRM as ${clientType} from LinkedIn`,
-          crmId: leadId,
-          crmType: 'odoo',
-          details: {
-            companyCreated: !isExistingCompany,
-            contactCreated: !contactAlreadyExists,
-            leadCreated: true,
-            clientType: clientType,
-            source: 'LinkedIn',
-            companyId: companyId,
-            contactId: contactId,
-            websiteUrl: linkedinUrl
+              const street = (leadData.street || '').trim();
+              if (street) contactData.street = street;
+
+              const comment = (leadData.comment || '').trim();
+              if (comment) contactData.comment = comment;
+
+              console.log('Contact data:', contactData);
+              
+              const contactResult = await callOdoo('res.partner', 'create', [
+                [contactData]
+              ]);
+              
+              contactId = Array.isArray(contactResult) ? contactResult[0] : contactResult;
+              createdRecords.contact = contactId;
+              console.log('Contact created. ID:', contactId);
+            }
+
+            // Check for duplicate opportunities
+            const existingLeadsByContact = await callOdoo('crm.lead', 'search_read', [
+              [
+                ['partner_id', '=', contactId],
+                ['active', '=', true]
+              ],
+              ['id', 'name', 'stage_id', 'probability']
+            ]);
+
+            let existingLeadsByLinkedIn = [];
+            if (linkedinUrl) {
+              existingLeadsByLinkedIn = await callOdoo('crm.lead', 'search_read', [
+                [
+                  ['website', '=', linkedinUrl],
+                  ['active', '=', true]
+                ],
+                ['id', 'name', 'stage_id', 'probability', 'partner_id']
+              ]);
+            }
+
+            const allExistingLeads = [...existingLeadsByContact, ...existingLeadsByLinkedIn];
+            const uniqueLeads = allExistingLeads.filter((lead, index, self) =>
+              index === self.findIndex(l => l.id === lead.id)
+            );
+
+            if (uniqueLeads && uniqueLeads.length > 0) {
+              const existingLead = uniqueLeads[0];
+              
+              console.log('Duplicate opportunity found in Odoo:', {
+                id: existingLead.id,
+                name: existingLead.name,
+                stage: existingLead.stage_id?.[1] || 'Unknown',
+                probability: existingLead.probability
+              });
+
+              await rollbackCreatedRecords(callOdoo, createdRecords);
+
+              await exportLogs.insertOne({
+                leadName: cleanName,
+                leadEmail: leadData.email,
+                linkedinUrl: linkedinUrl,
+                crmType: 'odoo',
+                crmId: existingLead.id,
+                exportedBy: userEmail,
+                exportedAt: new Date(),
+                status: 'duplicate',
+                profileType: 'client',
+                message: 'Opportunity already exists in Odoo',
+                companyId: companyId,
+                contactId: contactId
+              });
+
+              return res.json({
+                success: false,
+                alreadyExists: true,
+                message: `Opportunity already exists in Odoo CRM (ID: ${existingLead.id})`,
+                crmId: existingLead.id,
+                crmType: 'odoo',
+                opportunityName: existingLead.name,
+                stage: existingLead.stage_id?.[1] || 'Unknown',
+                details: {
+                  companyCreated: false,
+                  contactCreated: false,
+                  leadCreated: false,
+                  rolledBack: createdRecords.company || createdRecords.contact ? true : false
+                }
+              });
+            }
+
+            // Create opportunity
+            const leadCreateData = {
+              name: `${cleanName}'s opportunity`,
+              partner_id: parseInt(contactId, 10),
+              contact_name: cleanName,
+              type: 'opportunity',
+              user_id: salespersonId,
+              source_id: linkedinSourceId,
+              x_studio_client_type: clientType
+            };
+
+            const emailFrom = (leadData.email || '').trim();
+            if (emailFrom && isValidEmail(emailFrom) && emailFrom !== 'No email found') {
+              leadCreateData.email_from = emailFrom;
+            } else {
+              leadCreateData.email_from = 'noemail@domain.com';
+            }
+
+            const phone = (leadData.phone || '').trim();
+            if (phone) leadCreateData.phone = phone;
+
+            const func = (leadData.function || '').trim();
+            if (func) leadCreateData.function = func;
+
+            const street = (leadData.street || '').trim();
+            if (street) leadCreateData.street = street;
+
+            if (linkedinUrl) {
+              leadCreateData.website = linkedinUrl;
+            }
+
+            console.log('Creating opportunity with data:', { 
+              clientType, 
+              isExistingCompany, 
+              website: linkedinUrl 
+            });
+
+            const leadResult = await callOdoo('crm.lead', 'create', [
+              [leadCreateData]
+            ]);
+
+            const leadId = Array.isArray(leadResult) ? leadResult[0] : leadResult;
+            createdRecords.opportunity = leadId;
+            console.log('Opportunity created. ID:', leadId);
+
+            await exportLogs.insertOne({
+              leadName: cleanName,
+              leadEmail: leadData.email,
+              linkedinUrl: linkedinUrl,
+              crmType: 'odoo',
+              crmId: leadId,
+              companyId: companyId,
+              contactId: contactId,
+              exportedBy: userEmail,
+              exportedAt: new Date(),
+              status: 'success',
+              profileType: 'client',
+              clientType: clientType,
+              salespersonId: salespersonId,
+              sourceId: linkedinSourceId
+            });
+
+            return res.json({
+              success: true,
+              message: `Successfully exported lead to Odoo CRM as ${clientType} from LinkedIn`,
+              crmId: leadId,
+              crmType: 'odoo',
+              profileType: 'client',
+              details: {
+                companyCreated: !isExistingCompany,
+                contactCreated: !contactAlreadyExists,
+                leadCreated: true,
+                clientType: clientType,
+                source: 'LinkedIn',
+                companyId: companyId,
+                contactId: contactId,
+                websiteUrl: linkedinUrl
+              }
+            });
           }
-        });
 
-      } catch (creationError) {
-        console.error('Error during Odoo record creation:', creationError);
-        
-        // Rollback any created records
-        await rollbackCreatedRecords(callOdoo, createdRecords);
-        
-        throw creationError; // Re-throw to be caught by outer catch
-      }
+        } catch (creationError) {
+          console.error('Error during Odoo record creation:', creationError);
+          
+          await rollbackCreatedRecords(callOdoo, createdRecords);
+          
+          throw creationError;
+        }
 
       } catch (error) {
         console.error('Odoo export error:', error);
@@ -570,6 +825,7 @@ async function startServer() {
           leadName: req.body.leadData?.name,
           linkedinUrl: req.body.linkedinUrl,
           crmType: 'odoo',
+          profileType: req.body.profileType,
           exportedBy: req.body.userEmail,
           exportedAt: new Date(),
           status: 'failed',
@@ -585,7 +841,7 @@ async function startServer() {
       }
     });
 
-    // Check if already exported - UPDATED to verify in Odoo
+    // Check if already exported endpoint (unchanged)
     app.get('/api/crm/check-export', async (req, res) => {
       try {
         const { url, userEmail, crmConfig } = req.query;
@@ -597,7 +853,6 @@ async function startServer() {
           });
         }
 
-        // First check MongoDB logs
         const existingExport = await exportLogs.findOne({
           linkedinUrl: url,
           exportedBy: userEmail,
@@ -605,15 +860,10 @@ async function startServer() {
           crmType: 'odoo'
         });
 
-        // If not in MongoDB, definitely not exported
         if (!existingExport) {
           return res.json({ alreadyExported: false });
         }
 
-        // ✅ IMPORTANT: Verify the record still exists in Odoo
-        // (In case it was manually deleted from Odoo)
-        
-        // If no CRM config provided, can't verify in Odoo
         if (!crmConfig) {
           console.warn('No CRM config provided, cannot verify in Odoo');
           return res.json({
@@ -626,14 +876,12 @@ async function startServer() {
         }
 
         try {
-          // Parse CRM config
           const config = JSON.parse(crmConfig);
           
           if (!config.endpointUrl || !config.username || !config.password || !config.databaseName) {
             throw new Error('Incomplete CRM config');
           }
 
-          // Authenticate with Odoo
           const authUrl = `${config.endpointUrl}/web/session/authenticate`;
           const authResponse = await fetch(authUrl, {
             method: 'POST',
@@ -669,7 +917,9 @@ async function startServer() {
 
           const odooUrl = `${config.endpointUrl}/jsonrpc`;
 
-          // Check if the opportunity still exists in Odoo by ID
+          // Check both crm.lead and hr.applicant
+          const modelName = existingExport.profileType === 'candidate' ? 'hr.applicant' : 'crm.lead';
+          
           const checkResponse = await fetch(odooUrl, {
             method: 'POST',
             headers: {
@@ -686,7 +936,7 @@ async function startServer() {
                   config.databaseName,
                   userId,
                   config.password,
-                  'crm.lead',
+                  modelName,
                   'search_read',
                   [[['id', '=', existingExport.crmId]]],
                   ['id', 'name', 'active']
@@ -698,7 +948,6 @@ async function startServer() {
 
           if (!checkResponse.ok) {
             console.warn('Failed to check Odoo, assuming exists');
-            // If we can't check Odoo, return based on MongoDB
             return res.json({
               alreadyExported: true,
               exportedAt: existingExport.exportedAt,
@@ -709,21 +958,18 @@ async function startServer() {
           }
 
           const checkResult = await checkResponse.json();
-          const opportunities = checkResult.result || [];
+          const records = checkResult.result || [];
 
-          // If opportunity doesn't exist in Odoo (was deleted)
-          if (opportunities.length === 0) {
-            console.log(`Opportunity ${existingExport.crmId} not found in Odoo (was deleted manually)`);
+          if (records.length === 0) {
+            console.log(`Record ${existingExport.crmId} not found in Odoo (was deleted manually)`);
             
-            // ✅ Don't clean up MongoDB - just return that it doesn't exist in Odoo
             return res.json({ 
               alreadyExported: false,
               wasDeleted: true,
-              mongoDbHasLog: true // MongoDB still has the log
+              mongoDbHasLog: true
             });
           }
 
-          // Opportunity exists in Odoo
           return res.json({
             alreadyExported: true,
             exportedAt: existingExport.exportedAt,
@@ -734,7 +980,6 @@ async function startServer() {
 
         } catch (odooError) {
           console.warn('Error verifying in Odoo:', odooError.message);
-          // If verification fails, return based on MongoDB
           return res.json({
             alreadyExported: true,
             exportedAt: existingExport.exportedAt,
