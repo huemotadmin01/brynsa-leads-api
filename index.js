@@ -335,6 +335,8 @@ async function startServer() {
           const email = (leadData.email || '').trim();
           if (email && isValidEmail(email) && email !== 'No email found') {
             contactData.email = email;
+          } else {
+            contactData.email = 'noemail@domain.com';
           }
 
           const phone = (leadData.phone || '').trim();
@@ -412,6 +414,8 @@ async function startServer() {
         const emailFrom = (leadData.email || '').trim();
         if (emailFrom && isValidEmail(emailFrom) && emailFrom !== 'No email found') {
           leadCreateData.email_from = emailFrom;
+        } else {
+          leadCreateData.email_from = 'noemail@domain.com';
         }
 
         const phone = (leadData.phone || '').trim();
