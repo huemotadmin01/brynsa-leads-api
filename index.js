@@ -36,25 +36,75 @@ async function startServer() {
     await exportLogs.createIndex({ leadId: 1, crmType: 1 });
 
     // ------------------ EXISTING ENDPOINTS (UNCHANGED) ------------------
+    
+    // ========== IMPROVED LOOKUP ENDPOINT - Supports URL and Email ==========
     app.get('/api/leads/lookup', async (req, res) => {
       try {
-        const { linkedinUrl } = req.query;
-        if (!linkedinUrl) {
-          return res.status(400).json({ exists: false, error: 'linkedinUrl required' });
+        const { linkedinUrl, email } = req.query;
+        
+        if (!linkedinUrl && !email) {
+          return res.status(400).json({ exists: false, error: 'linkedinUrl or email required' });
         }
 
-        const found = await leads.findOne(
-          { linkedinUrl },
-          { projection: { email: 1, linkedinUrl: 1 } }
-        );
+        let found = null;
 
-        if (!found) return res.json({ exists: false });
+        // Try URL lookup first
+        if (linkedinUrl) {
+          // Normalize URL for comparison
+          const normalizedUrl = linkedinUrl.replace(/\/$/, '').toLowerCase();
+          const profileId = normalizedUrl.split('/in/')[1]?.split('/')[0]?.split('?')[0];
+          
+          // Try multiple URL variations
+          found = await leads.findOne({
+            $or: [
+              { linkedinUrl: linkedinUrl },
+              { linkedinUrl: linkedinUrl.replace(/\/$/, '') },
+              { linkedinUrl: linkedinUrl + '/' },
+              { linkedinUrl: { $regex: new RegExp(`/in/${profileId}/?$`, 'i') } }
+            ]
+          });
+          
+          if (found) {
+            console.log('✅ Found lead by URL');
+          }
+        }
 
-        const email = isValidEmail(found.email) && found.email.toLowerCase() !== 'noemail@domain.com'
+        // If not found by URL, try email lookup
+        if (!found && email) {
+          found = await leads.findOne({
+            email: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+          });
+          
+          if (found) {
+            console.log('✅ Found lead by email');
+          }
+        }
+
+        if (!found) {
+          return res.json({ exists: false });
+        }
+
+        // Check if email is valid
+        const validEmail = isValidEmail(found.email) && found.email.toLowerCase() !== 'noemail@domain.com'
           ? found.email
           : null;
 
-        return res.json({ exists: true, email });
+        // Return lead data including verification fields
+        return res.json({ 
+          exists: true, 
+          email: validEmail,
+          lead: {
+            name: found.name,
+            email: found.email,
+            companyName: found.companyName,
+            linkedinUrl: found.linkedinUrl,
+            emailVerified: found.emailVerified,
+            emailVerifiedAt: found.emailVerifiedAt,
+            emailVerificationMethod: found.emailVerificationMethod,
+            emailVerificationConfidence: found.emailVerificationConfidence,
+            emailVerificationReason: found.emailVerificationReason
+          }
+        });
       } catch (err) {
         console.error('❌ Lookup failed:', err.message);
         res.status(500).json({ exists: false, error: 'server_error' });
