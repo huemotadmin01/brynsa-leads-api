@@ -111,6 +111,83 @@ async function startServer() {
       }
     });
 
+    // ========== EXPORT LEADS AS CSV ==========
+    app.get('/api/leads/export', async (req, res) => {
+      try {
+        const { format = 'csv', secret } = req.query;
+        
+        // Simple security - require secret key
+        if (secret !== 'export-leads-2024') {
+          return res.status(401).json({ error: 'Invalid secret key' });
+        }
+        
+        console.log('📥 Exporting leads with valid emails...');
+        
+        // Find all leads with valid emails
+        const leadsData = await leads.find({
+          email: { 
+            $exists: true, 
+            $ne: null, 
+            $ne: "", 
+            $nin: ["noemail@domain.com", "No email found"]
+          }
+        }, {
+          projection: {
+            _id: 0,
+            name: 1,
+            email: 1,
+            companyName: 1,
+            sourcedBy: 1,
+            linkedinUrl: 1,
+            location: 1,
+            headline: 1,
+            currentTitle: 1,
+            createdAt: 1,
+            savedAt: 1
+          }
+        }).toArray();
+        
+        console.log(`📊 Found ${leadsData.length} leads with emails`);
+        
+        if (format === 'json') {
+          return res.json({
+            success: true,
+            count: leadsData.length,
+            data: leadsData
+          });
+        }
+        
+        // CSV format
+        const headers = ['Name', 'Email', 'Company', 'SourcedBy', 'LinkedInURL', 'Location', 'Headline', 'Title'];
+        
+        const csvRows = [headers.join(',')];
+        
+        for (const lead of leadsData) {
+          const row = [
+            `"${(lead.name || '').replace(/"/g, '""')}"`,
+            `"${(lead.email || '').replace(/"/g, '""')}"`,
+            `"${(lead.companyName || '').replace(/"/g, '""')}"`,
+            `"${(lead.sourcedBy || '').replace(/"/g, '""')}"`,
+            `"${(lead.linkedinUrl || '').replace(/"/g, '""')}"`,
+            `"${(lead.location || '').replace(/"/g, '""')}"`,
+            `"${(lead.headline || '').replace(/"/g, '""')}"`,
+            `"${(lead.currentTitle || '').replace(/"/g, '""')}"`,
+          ];
+          csvRows.push(row.join(','));
+        }
+        
+        const csv = csvRows.join('\n');
+        
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename=leads_export_${new Date().toISOString().split('T')[0]}.csv`);
+        return res.send(csv);
+        
+      } catch (err) {
+        console.error('❌ Export failed:', err.message);
+        res.status(500).json({ error: 'Export failed', message: err.message });
+      }
+    });
+
     app.put('/api/leads/upsert-email', async (req, res) => {
       try {
         const { linkedinUrl, email } = req.body || {};
