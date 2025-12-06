@@ -1103,5 +1103,7 @@ async function startServer() {
     console.error('❌ MongoDB connection failed:', err.message);
   }
 }
-
+const { setupEmailSystem, learnFromLead } = require('./emailSystem');
+// Force redeploy v2
+require('dotenv').config();
 startServer();
