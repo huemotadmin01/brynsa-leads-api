@@ -1,0 +1,35 @@
+name: Email Verification Cron
+on:
+  schedule:
+    # Run at 10:00 IST (04:30 UTC) and 16:00 IST (10:30 UTC) Mon-Fri
+    # Staggered from enrichment to avoid overlap
+    - cron: '30 4 * * 1-5'   # 10:00 IST
+    - cron: '30 10 * * 1-5'  # 16:00 IST
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  verify-emails:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm install
+        
+      - name: Run verification script
+        run: node verifyEmails.js
+        env:
+          MONGO_URL: ${{ secrets.MONGO_URL }}
+          
+      - name: Report results
+        if: always()
+        run: echo "Verification job completed at $(date)"
