@@ -1,4 +1,5 @@
 const { setupEmailSystem, learnFromLead } = require('./emailSystem');
+const { setupVerificationRoutes } = require('./verifyEmails');
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -26,6 +27,7 @@ async function startServer() {
 
     const db = client.db('brynsaleads');
     setupEmailSystem(app, db);
+    setupVerificationRoutes(app, db);  // Add this line
     const leads = db.collection('leads');
     const exportLogs = db.collection('export_logs');
 
