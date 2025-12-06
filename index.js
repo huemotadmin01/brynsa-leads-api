@@ -1,3 +1,4 @@
+const { setupEmailSystem, learnFromLead } = require('./emailSystem');
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -24,6 +25,7 @@ async function startServer() {
     console.log('✅ Connected to MongoDB');
 
     const db = client.db('brynsaleads');
+    setupEmailSystem(app, db);
     const leads = db.collection('leads');
     const exportLogs = db.collection('export_logs');
 
@@ -98,6 +100,7 @@ async function startServer() {
         }
 
         await leads.insertOne(lead);
+        await learnFromLead(db, lead);
         res.status(200).json({ success: true, message: 'Lead saved to MongoDB!' });
       } catch (err) {
         console.error('❌ Insert failed:', err.message);
