@@ -10,6 +10,8 @@
  * - ODOO_USERNAME: Odoo username
  * - ODOO_PASSWORD: Odoo password
  * - ODOO_DATABASE: Odoo database name
+ * - EXPORT_SECRET: Secret key for /api/leads/export endpoint
+ * - REBUILD_SECRET: Secret key for /api/email/rebuild-cache endpoint
  * - PORT: Server port (default: 3000)
  */
 
@@ -23,6 +25,24 @@ const { MongoClient } = require('mongodb');
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// ============================================================================
+// ENVIRONMENT VALIDATION
+// ============================================================================
+const requiredEnvVars = ['MONGO_URL', 'OPENAI_API_KEY', 'EXPORT_SECRET'];
+const optionalEnvVars = ['REBUILD_SECRET', 'ODOO_ENDPOINT', 'ODOO_USERNAME', 'ODOO_PASSWORD', 'ODOO_DATABASE'];
+
+console.log('🔒 Environment Check:');
+for (const envVar of requiredEnvVars) {
+  if (!process.env[envVar]) {
+    console.error(`❌ CRITICAL: Missing required env var: ${envVar}`);
+  } else {
+    console.log(`✅ ${envVar}: configured`);
+  }
+}
+for (const envVar of optionalEnvVars) {
+  console.log(`${process.env[envVar] ? '✅' : '⚠️'} ${envVar}: ${process.env[envVar] ? 'configured' : 'not set'}`);
+}
 
 const mongoUrl = process.env.MONGO_URL;
 console.log('🔗 Mongo URL:', mongoUrl ? '***configured***' : '❌ MISSING');
@@ -308,7 +328,8 @@ async function startServer() {
       try {
         const { format = 'csv', secret } = req.query;
         
-        if (secret !== 'export-leads-2024') {
+        // SECURITY: Use environment variable for export secret
+        if (secret !== process.env.EXPORT_SECRET) {
           return res.status(401).json({ error: 'Invalid secret key' });
         }
         
