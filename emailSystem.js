@@ -118,7 +118,7 @@ function setupEmailSystem(app, db) {
     try {
       const { secret } = req.body;
       
-      if (secret !== "rebuild-patterns-2024") {
+      if (secret !== process.env.REBUILD_SECRET) {
         return res.status(401).json({ success: false, error: "Invalid secret" });
       }
 
