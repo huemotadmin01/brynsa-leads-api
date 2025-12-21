@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "enrich": "node enrichEmails.js"
+  "start": "node index.js",
+  "enrich": "node enrichEmails.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
