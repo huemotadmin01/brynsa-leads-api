@@ -17,6 +17,7 @@
 
 const { setupEmailSystem, learnFromLead } = require('./emailSystem');
 const { setupVerificationRoutes } = require('./verifyEmails');
+const { setupAuthRoutes, authMiddleware, optionalAuthMiddleware, checkFeatureAccess, incrementUsage } = require('./src/auth');
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -146,6 +147,7 @@ async function startServer() {
     const db = client.db('brynsaleads');
     setupEmailSystem(app, db);
     setupVerificationRoutes(app, db);
+    setupAuthRoutes(app, db);
     const leads = db.collection('leads');
     const exportLogs = db.collection('export_logs');
 
@@ -156,58 +158,101 @@ async function startServer() {
     // NEW: OPENAI PROXY ENDPOINTS
     // ========================================================================
 
-    app.post('/api/openai/generate', async (req, res) => {
-      try {
-        const { prompt, maxTokens, userEmail } = req.body;
+app.post('/api/openai/generate', authMiddleware, async (req, res) => {
+  try {
+    const { prompt, maxTokens, userEmail, featureType } = req.body;
 
-        if (!prompt) {
-          return res.status(400).json({ success: false, error: 'Prompt is required' });
-        }
+    if (!prompt) {
+      return res.status(400).json({ success: false, error: 'Prompt is required' });
+    }
 
-        if (!process.env.OPENAI_API_KEY) {
-          return res.status(500).json({ success: false, error: 'AI service not configured' });
-        }
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({ success: false, error: 'AI service not configured' });
+    }
 
-        if (userEmail) {
-          const rateCheck = checkRateLimit(userEmail, 'openai');
-          if (!rateCheck.allowed) {
-            return res.status(429).json({ 
-              success: false, 
-              error: 'Rate limit exceeded',
-              retryAfter: rateCheck.retryAfter
-            });
-          }
-        }
-
-        console.log(`🤖 OpenAI request from ${userEmail || 'unknown'}`);
-
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: 'gpt-3.5-turbo',
-            messages: [{ role: 'user', content: prompt }],
-            max_tokens: maxTokens || 300,
-            temperature: 0.7
-          })
+    // ========================
+    // NEW: Feature gate check
+    // ========================
+    if (process.env.FEATURE_GATES_ENABLED === 'true') {
+      // Determine which feature based on request
+      // featureType can be: 'email', 'dm', 'note'
+      const featureMap = {
+        'email': 'emailGeneration',
+        'dm': 'dmGeneration',
+        'note': 'noteGeneration'
+      };
+      
+      const featureName = featureMap[featureType] || 'emailGeneration'; // Default to email
+      
+      const { allowed, user } = await checkFeatureAccess(db, req.userId, featureName);
+      
+      if (!allowed) {
+        return res.status(403).json({
+          success: false,
+          error: 'Feature locked',
+          code: 'FEATURE_LOCKED',
+          feature: featureName,
+          message: `Upgrade to unlock ${featureName.replace(/([A-Z])/g, ' $1').trim()}`,
+          upgradeUrl: 'https://brynsa.com/pricing'
         });
-
-        const data = await response.json();
-
-        if (data.error) {
-          return res.status(500).json({ success: false, error: data.error.message });
-        }
-
-        res.json({ success: true, content: data.choices?.[0]?.message?.content });
-
-      } catch (error) {
-        console.error('❌ OpenAI proxy error:', error);
-        res.status(500).json({ success: false, error: 'AI service temporarily unavailable' });
       }
+    }
+
+    // Existing rate limit check (keep this)
+    if (req.userEmail) {
+      const rateCheck = checkRateLimit(req.userEmail, 'openai');
+      if (!rateCheck.allowed) {
+        return res.status(429).json({ 
+          success: false, 
+          error: 'Rate limit exceeded',
+          retryAfter: rateCheck.retryAfter
+        });
+      }
+    }
+
+    console.log(`🤖 OpenAI request from ${req.userEmail || 'unknown'} (feature: ${featureType || 'email'})`);
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'gpt-3.5-turbo',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: maxTokens || 300,
+        temperature: 0.7
+      })
     });
+
+    const data = await response.json();
+
+    if (data.error) {
+      return res.status(500).json({ success: false, error: data.error.message });
+    }
+
+    // ========================
+    // NEW: Track usage
+    // ========================
+    if (process.env.FEATURE_GATES_ENABLED === 'true') {
+      const featureMap = {
+        'email': 'emailGeneration',
+        'dm': 'dmGeneration',
+        'note': 'noteGeneration'
+      };
+      const featureName = featureMap[featureType] || 'emailGeneration';
+      await incrementUsage(db, req.userId, featureName);
+    }
+
+    res.json({ success: true, content: data.choices?.[0]?.message?.content });
+
+  } catch (error) {
+    console.error('❌ OpenAI proxy error:', error);
+    res.status(500).json({ success: false, error: 'AI service temporarily unavailable' });
+  }
+});
+
 
     app.post('/api/openai/extract-skill', async (req, res) => {
       try {
@@ -385,26 +430,32 @@ async function startServer() {
       }
     });
 
-    app.post('/api/leads', async (req, res) => {
-      try {
-        const lead = req.body;
+app.post('/api/leads', optionalAuthMiddleware, async (req, res) => {
+  try {
+    const lead = req.body;
 
-        if (!lead.name || !lead.email) {
-          return res.status(400).json({ success: false, message: 'Missing required fields' });
-        }
+    if (!lead.name || !lead.email) {
+      return res.status(400).json({ success: false, message: 'Missing required fields' });
+    }
 
-        const existing = await leads.findOne({ linkedinUrl: lead.linkedinUrl });
-        if (existing) {
-          return res.status(200).json({ message: 'Lead already exists', inserted: false });
-        }
+    const existing = await leads.findOne({ linkedinUrl: lead.linkedinUrl });
+    if (existing) {
+      return res.status(200).json({ message: 'Lead already exists', inserted: false });
+    }
 
-        await leads.insertOne(lead);
-        await learnFromLead(db, lead);
-        res.status(200).json({ success: true, message: 'Lead saved to MongoDB!' });
-      } catch (err) {
-        res.status(500).json({ success: false, message: 'Failed to save lead.' });
-      }
-    });
+    await leads.insertOne(lead);
+    await learnFromLead(db, lead);
+    
+    // NEW: Track scraping usage (optional, for analytics)
+    if (req.userId) {
+      await incrementUsage(db, req.userId, 'leadsScraping');
+    }
+    
+    res.status(200).json({ success: true, message: 'Lead saved to MongoDB!' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to save lead.' });
+  }
+});
 
     // ========================================================================
     // ODOO CRM EXPORT - SECURE VERSION
@@ -455,7 +506,7 @@ async function startServer() {
     }
 
     // SECURE ODOO EXPORT - No client credentials
-    app.post('/api/crm/export-odoo', async (req, res) => {
+app.post('/api/crm/export-odoo', authMiddleware, async (req, res) => {
       try {
         // SECURITY: Do NOT accept crmConfig from client
         const { leadData, userEmail, linkedinUrl, profileType, extractedSkill } = req.body;
