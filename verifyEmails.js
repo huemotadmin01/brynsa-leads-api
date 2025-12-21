@@ -2,7 +2,7 @@
 // verifyEmails.js - Batch Email Verification using FREE methods
 // Run via GitHub Actions cron job
 // ============================================================================
-
+require("dotenv").config();
 const { MongoClient } = require("mongodb");
 const dns = require("dns").promises;
 const net = require("net");
