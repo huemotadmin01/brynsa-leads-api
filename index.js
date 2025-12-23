@@ -14,7 +14,7 @@
  * - REBUILD_SECRET: Secret key for /api/email/rebuild-cache endpoint
  * - PORT: Server port (default: 3000)
  */
-
+const { setupAuthRoutes } = require('./src/auth');
 const { setupEmailSystem, learnFromLead } = require('./emailSystem');
 const { setupVerificationRoutes } = require('./verifyEmails');
 require('dotenv').config();
@@ -146,6 +146,7 @@ async function startServer() {
     const db = client.db('brynsaleads');
     setupEmailSystem(app, db);
     setupVerificationRoutes(app, db);
+    setupAuthRoutes(app, db);
     const leads = db.collection('leads');
     const exportLogs = db.collection('export_logs');
 
