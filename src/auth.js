@@ -9,6 +9,9 @@
 // New endpoints added:
 // - POST /api/auth/send-otp
 // - POST /api/auth/verify-otp  
+// - POST /api/auth/verify-otp-only (for password setup flow)
+// - POST /api/auth/signup (create account with password)
+// - POST /api/auth/login (email + password login)
 // - POST /api/auth/google (for portal, separate from extension OAuth)
 // - GET  /api/user/profile
 // - PUT  /api/user/profile
@@ -18,6 +21,7 @@
 // ============================================================================
 
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 
 // ============================================================================
 // CONFIGURATION
@@ -26,8 +30,10 @@ const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'brynsa-dev-secret-change-in-production';
 const JWT_EXPIRY = '30d';
 const OTP_EXPIRY_MINUTES = 10;
+
 const { Resend } = require('resend');
 const resend = new Resend(process.env.RESEND_API_KEY);
+
 // Feature gates - DISABLED by default for safe rollout
 const FEATURE_GATES_ENABLED = process.env.FEATURE_GATES_ENABLED === 'true';
 
@@ -85,42 +91,39 @@ function setupAuthRoutes(app, db) {
         email: normalizedEmail,
         otp,
         expiresAt,
+        verified: false,
         createdAt: new Date()
       });
 
-      // TODO: Send actual email via SendGrid/AWS SES
-// Send OTP via email
-try {
-    await resend.emails.send({
-      from: 'Brynsa <noreply@huemot.com>',
-      to: normalizedEmail,
-      subject: 'Your Brynsa verification code',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 20px;">
-          <h2 style="color: #22c55e; margin-bottom: 20px;">Verify your email</h2>
-          <p style="color: #333; font-size: 16px;">Your verification code is:</p>
-          <div style="background: #f3f4f6; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
-            <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #111;">${otp}</span>
-          </div>
-          <p style="color: #666; font-size: 14px;">This code expires in 10 minutes.</p>
-          <p style="color: #666; font-size: 14px;">If you didn't request this code, you can safely ignore this email.</p>
-          <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-          <p style="color: #999; font-size: 12px;">© Brynsa - LinkedIn Lead Extractor</p>
-        </div>
-      `
-    });
-    console.log(`📧 OTP sent to ${normalizedEmail}`);
-  } catch (emailError) {
-    console.error('Failed to send email:', emailError);
-    // Still log OTP for debugging
-    console.log(`📧 OTP for ${normalizedEmail}: ${otp}`);
-  }
+      // Send OTP via email
+      try {
+        await resend.emails.send({
+          from: 'Brynsa <noreply@huemot.com>',
+          to: normalizedEmail,
+          subject: 'Your Brynsa verification code',
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 20px;">
+              <h2 style="color: #22c55e; margin-bottom: 20px;">Verify your email</h2>
+              <p style="color: #333; font-size: 16px;">Your verification code is:</p>
+              <div style="background: #f3f4f6; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
+                <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #111;">${otp}</span>
+              </div>
+              <p style="color: #666; font-size: 14px;">This code expires in 10 minutes.</p>
+              <p style="color: #666; font-size: 14px;">If you didn't request this code, you can safely ignore this email.</p>
+              <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+              <p style="color: #999; font-size: 12px;">© Brynsa - LinkedIn Lead Extractor</p>
+            </div>
+          `
+        });
+        console.log(`📧 OTP sent to ${normalizedEmail}`);
+      } catch (emailError) {
+        console.error('Failed to send email:', emailError);
+        console.log(`📧 OTP for ${normalizedEmail}: ${otp}`);
+      }
 
       res.json({ 
         success: true, 
-        message: 'OTP sent to email',
-        // Remove in production - only for testing
-        ...(process.env.NODE_ENV !== 'production' && { otp })
+        message: 'OTP sent to email'
       });
 
     } catch (error) {
@@ -130,7 +133,7 @@ try {
   });
 
   // ========================================================================
-  // POST /api/auth/verify-otp - Verify OTP and login/register
+  // POST /api/auth/verify-otp - Verify OTP and login/register (legacy)
   // ========================================================================
   app.post('/api/auth/verify-otp', async (req, res) => {
     try {
@@ -171,6 +174,184 @@ try {
     } catch (error) {
       console.error('❌ Verify OTP error:', error);
       res.status(500).json({ success: false, error: 'Verification failed' });
+    }
+  });
+
+  // ========================================================================
+  // POST /api/auth/verify-otp-only - Verify OTP without creating user
+  // Used for password setup flow
+  // ========================================================================
+  app.post('/api/auth/verify-otp-only', async (req, res) => {
+    try {
+      const { email, otp } = req.body;
+
+      if (!email || !otp) {
+        return res.status(400).json({ success: false, error: 'Email and OTP required' });
+      }
+
+      const normalizedEmail = email.toLowerCase().trim();
+
+      const otpRecord = await otpCodes.findOne({
+        email: normalizedEmail,
+        otp: otp.toString(),
+        expiresAt: { $gt: new Date() }
+      });
+
+      if (!otpRecord) {
+        return res.status(400).json({ success: false, error: 'Invalid or expired OTP' });
+      }
+
+      // Mark OTP as verified (don't delete yet - needed for signup)
+      await otpCodes.updateOne(
+        { _id: otpRecord._id },
+        { $set: { verified: true, verifiedAt: new Date() } }
+      );
+
+      res.json({ success: true, message: 'OTP verified' });
+
+    } catch (error) {
+      console.error('OTP verify-only error:', error);
+      res.status(500).json({ success: false, error: 'Verification failed' });
+    }
+  });
+
+  // ========================================================================
+  // POST /api/auth/signup - Complete signup with name and password
+  // ========================================================================
+  app.post('/api/auth/signup', async (req, res) => {
+    try {
+      const { email, otp, name, password } = req.body;
+
+      if (!email || !otp || !name || !password) {
+        return res.status(400).json({ success: false, error: 'All fields required' });
+      }
+
+      if (password.length < 10) {
+        return res.status(400).json({ success: false, error: 'Password must be at least 10 characters' });
+      }
+
+      const normalizedEmail = email.toLowerCase().trim();
+
+      // Find verified OTP
+      const otpRecord = await otpCodes.findOne({
+        email: normalizedEmail,
+        otp: otp.toString(),
+        verified: true,
+        expiresAt: { $gt: new Date() }
+      });
+
+      if (!otpRecord) {
+        return res.status(400).json({ success: false, error: 'Invalid or expired OTP. Please request a new code.' });
+      }
+
+      // Check if user already exists
+      const existingUser = await users.findOne({ email: normalizedEmail });
+      if (existingUser) {
+        return res.status(400).json({ success: false, error: 'Account already exists. Please login.' });
+      }
+
+      // Hash password
+      const hashedPassword = await bcrypt.hash(password, 12);
+
+      // Create user
+      const newUser = {
+        email: normalizedEmail,
+        name: sanitizeString(name, 100),
+        password: hashedPassword,
+        picture: null,
+        googleId: null,
+        plan: 'free',
+        features: FREE_PLAN_FEATURES,
+        usage: {
+          leadsScraped: 0,
+          emailsGenerated: 0,
+          dmsGenerated: 0,
+          notesGenerated: 0,
+          crmExports: 0
+        },
+        onboarding: {
+          completed: false
+        },
+        source: 'portal',
+        createdAt: new Date(),
+        lastLogin: new Date()
+      };
+
+      const result = await users.insertOne(newUser);
+      const user = { ...newUser, _id: result.insertedId };
+
+      // Delete used OTP
+      await otpCodes.deleteMany({ email: normalizedEmail });
+
+      // Generate token
+      const token = generateToken(user);
+
+      console.log(`👤 New user signed up: ${normalizedEmail}`);
+
+      res.json({
+        success: true,
+        token,
+        user: sanitizeUser(user)
+      });
+
+    } catch (error) {
+      console.error('Signup error:', error);
+      res.status(500).json({ success: false, error: 'Signup failed' });
+    }
+  });
+
+  // ========================================================================
+  // POST /api/auth/login - Login with email and password
+  // ========================================================================
+  app.post('/api/auth/login', async (req, res) => {
+    try {
+      const { email, password } = req.body;
+
+      if (!email || !password) {
+        return res.status(400).json({ success: false, error: 'Email and password required' });
+      }
+
+      const normalizedEmail = email.toLowerCase().trim();
+
+      // Find user
+      const user = await users.findOne({ email: normalizedEmail });
+      
+      if (!user) {
+        return res.status(401).json({ success: false, error: 'Invalid email or password' });
+      }
+
+      // Check if user has password (might be Google-only user)
+      if (!user.password) {
+        return res.status(401).json({ success: false, error: 'Please login with Google or reset your password' });
+      }
+
+      // Verify password
+      const isValidPassword = await bcrypt.compare(password, user.password);
+      
+      if (!isValidPassword) {
+        return res.status(401).json({ success: false, error: 'Invalid email or password' });
+      }
+
+      // Update last login
+      await users.updateOne(
+        { _id: user._id },
+        { $set: { lastLogin: new Date() } }
+      );
+
+      // Generate token
+      const token = generateToken(user);
+
+      console.log(`🔐 User logged in: ${normalizedEmail}`);
+
+      res.json({
+        success: true,
+        token,
+        user: sanitizeUser(user)
+      });
+
+    } catch (error) {
+      console.error('Login error:', error);
+      res.status(500).json({ success: false, error: 'Login failed' });
     }
   });
 
@@ -356,8 +537,9 @@ try {
   });
 
   console.log('✅ Portal Auth routes registered (ADDITIVE - existing routes unchanged)');
-  console.log('   New endpoints: /api/auth/send-otp, /api/auth/verify-otp, /api/auth/google');
-  console.log('   New endpoints: /api/user/profile, /api/user/features, /api/user/onboarding');
+  console.log('   Auth endpoints: /api/auth/send-otp, /api/auth/verify-otp, /api/auth/verify-otp-only');
+  console.log('   Auth endpoints: /api/auth/signup, /api/auth/login, /api/auth/google');
+  console.log('   User endpoints: /api/user/profile, /api/user/features, /api/user/onboarding');
   console.log(`   Feature gates: ${FEATURE_GATES_ENABLED ? 'ENABLED' : 'DISABLED (safe mode)'}`);
 }
 
@@ -375,7 +557,7 @@ function generateToken(user) {
       userId: user._id.toString(),
       email: user.email,
       plan: user.plan || 'free',
-      source: 'portal' // Distinguish from extension auth
+      source: 'portal'
     },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRY }
@@ -424,7 +606,7 @@ async function findOrCreateUser(users, userData) {
       onboarding: {
         completed: false
       },
-      source: 'portal', // Track that user came from portal
+      source: 'portal',
       createdAt: new Date(),
       lastLogin: new Date()
     };
@@ -451,6 +633,7 @@ function sanitizeUser(user) {
     onboarding: user.onboarding || { completed: false },
     createdAt: user.createdAt,
     lastLogin: user.lastLogin
+    // NOTE: Never include password!
   };
 }
 
@@ -503,7 +686,6 @@ function authMiddleware(users) {
   };
 }
 
-// Optional auth - doesn't block, just adds user if token present
 function optionalAuthMiddleware(users) {
   return async (req, res, next) => {
     try {
@@ -535,11 +717,10 @@ function optionalAuthMiddleware(users) {
 }
 
 // ============================================================================
-// FEATURE GATE HELPERS (for future use)
+// FEATURE GATE HELPERS
 // ============================================================================
 
 function checkFeatureAccess(user, feature) {
-  // If gates disabled, allow everything (safe rollout)
   if (!FEATURE_GATES_ENABLED) return true;
   if (!user) return false;
   
