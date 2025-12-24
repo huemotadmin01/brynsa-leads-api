@@ -92,7 +92,7 @@ function setupAuthRoutes(app, db) {
 // Send OTP via email
 try {
     await resend.emails.send({
-      from: 'Brynsa <onboarding@resend.dev>',
+      from: 'Brynsa <noreply@huemot.com>',
       to: normalizedEmail,
       subject: 'Your Brynsa verification code',
       html: `
