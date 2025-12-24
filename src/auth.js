@@ -26,7 +26,8 @@ const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'brynsa-dev-secret-change-in-production';
 const JWT_EXPIRY = '30d';
 const OTP_EXPIRY_MINUTES = 10;
-
+const { Resend } = require('resend');
+const resend = new Resend(process.env.RESEND_API_KEY);
 // Feature gates - DISABLED by default for safe rollout
 const FEATURE_GATES_ENABLED = process.env.FEATURE_GATES_ENABLED === 'true';
 
@@ -88,7 +89,32 @@ function setupAuthRoutes(app, db) {
       });
 
       // TODO: Send actual email via SendGrid/AWS SES
-      console.log(`📧 OTP for ${normalizedEmail}: ${otp}`);
+// Send OTP via email
+try {
+    await resend.emails.send({
+      from: 'Brynsa <onboarding@resend.dev>',
+      to: normalizedEmail,
+      subject: 'Your Brynsa verification code',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 20px;">
+          <h2 style="color: #22c55e; margin-bottom: 20px;">Verify your email</h2>
+          <p style="color: #333; font-size: 16px;">Your verification code is:</p>
+          <div style="background: #f3f4f6; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
+            <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #111;">${otp}</span>
+          </div>
+          <p style="color: #666; font-size: 14px;">This code expires in 10 minutes.</p>
+          <p style="color: #666; font-size: 14px;">If you didn't request this code, you can safely ignore this email.</p>
+          <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+          <p style="color: #999; font-size: 12px;">© Brynsa - LinkedIn Lead Extractor</p>
+        </div>
+      `
+    });
+    console.log(`📧 OTP sent to ${normalizedEmail}`);
+  } catch (emailError) {
+    console.error('Failed to send email:', emailError);
+    // Still log OTP for debugging
+    console.log(`📧 OTP for ${normalizedEmail}: ${otp}`);
+  }
 
       res.json({ 
         success: true, 
