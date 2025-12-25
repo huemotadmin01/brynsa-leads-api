@@ -64,12 +64,19 @@ const PRO_PLAN_FEATURES = {
 function setupAuthRoutes(app, db) {
   const users = db.collection('portal_users'); // NEW collection - won't conflict
   const otpCodes = db.collection('otp_codes');
+  const companies = db.collection('companies'); // Company details collection
 
   // Create indexes
   users.createIndex({ email: 1 }, { unique: true }).catch(() => {});
   users.createIndex({ googleId: 1 }, { sparse: true }).catch(() => {});
   otpCodes.createIndex({ email: 1 }).catch(() => {});
   otpCodes.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }).catch(() => {});
+  
+  // Company indexes
+  companies.createIndex({ name: 1 }, { unique: true }).catch(() => {});
+  companies.createIndex({ normalizedName: 1 }).catch(() => {});
+  companies.createIndex({ linkedinUrl: 1 }, { sparse: true }).catch(() => {});
+  companies.createIndex({ domain: 1 }, { sparse: true }).catch(() => {});
 
   // ========================================================================
   // POST /api/auth/send-otp - Send OTP to email
@@ -558,26 +565,211 @@ function setupAuthRoutes(app, db) {
     try {
       const { companyName, role, teamSize, useCase } = req.body;
 
-      await users.updateOne(
-        { _id: req.user._id },
-        {
-          $set: {
-            onboarding: {
-              completed: true,
-              companyName: sanitizeString(companyName, 200),
-              role: sanitizeString(role, 100),
-              teamSize: sanitizeString(teamSize, 50),
-              useCase: sanitizeString(useCase, 100),
-              completedAt: new Date()
+      const sanitizedCompanyName = sanitizeString(companyName, 200);
+      
+      // Create or update company if company name provided
+      if (sanitizedCompanyName) {
+        const normalizedName = sanitizedCompanyName.toLowerCase().trim();
+        
+        await companies.updateOne(
+          { normalizedName },
+          {
+            $set: {
+              name: sanitizedCompanyName,
+              normalizedName,
+              updatedAt: new Date()
+            },
+            $setOnInsert: {
+              createdAt: new Date(),
+              source: 'onboarding',
+              createdBy: req.user._id
+            }
+          },
+          { upsert: true }
+        );
+
+        // Get company ID and link to user
+        const company = await companies.findOne({ normalizedName });
+        
+        await users.updateOne(
+          { _id: req.user._id },
+          {
+            $set: {
+              companyId: company._id,
+              onboarding: {
+                completed: true,
+                companyName: sanitizedCompanyName,
+                role: sanitizeString(role, 100),
+                teamSize: sanitizeString(teamSize, 50),
+                useCase: sanitizeString(useCase, 100),
+                completedAt: new Date()
+              }
             }
           }
-        }
-      );
+        );
+      } else {
+        await users.updateOne(
+          { _id: req.user._id },
+          {
+            $set: {
+              onboarding: {
+                completed: true,
+                companyName: '',
+                role: sanitizeString(role, 100),
+                teamSize: sanitizeString(teamSize, 50),
+                useCase: sanitizeString(useCase, 100),
+                completedAt: new Date()
+              }
+            }
+          }
+        );
+      }
 
       res.json({ success: true, message: 'Onboarding completed' });
 
     } catch (error) {
+      console.error('Onboarding error:', error);
       res.status(500).json({ success: false, error: 'Failed to save onboarding' });
+    }
+  });
+
+  // ========================================================================
+  // GET /api/companies/search - Search companies by name (autocomplete)
+  // ========================================================================
+  app.get('/api/companies/search', async (req, res) => {
+    try {
+      const { q } = req.query;
+      
+      if (!q || q.length < 2) {
+        return res.json({ success: true, companies: [] });
+      }
+
+      const searchTerm = q.toLowerCase().trim();
+      
+      const results = await companies.find({
+        normalizedName: { $regex: searchTerm, $options: 'i' }
+      })
+      .project({ 
+        _id: 1, 
+        name: 1, 
+        domain: 1, 
+        industry: 1, 
+        logo: 1,
+        linkedinUrl: 1,
+        employeeCount: 1
+      })
+      .limit(10)
+      .toArray();
+
+      res.json({ success: true, companies: results });
+
+    } catch (error) {
+      console.error('Company search error:', error);
+      res.status(500).json({ success: false, error: 'Search failed' });
+    }
+  });
+
+  // ========================================================================
+  // POST /api/companies - Create or update company (for extension)
+  // ========================================================================
+  app.post('/api/companies', async (req, res) => {
+    try {
+      const { 
+        name, 
+        linkedinUrl, 
+        domain, 
+        industry, 
+        employeeCount, 
+        description,
+        logo,
+        headquarters,
+        website,
+        founded
+      } = req.body;
+
+      if (!name) {
+        return res.status(400).json({ success: false, error: 'Company name is required' });
+      }
+
+      const sanitizedName = sanitizeString(name, 200);
+      const normalizedName = sanitizedName.toLowerCase().trim();
+
+      const updateData = {
+        name: sanitizedName,
+        normalizedName,
+        updatedAt: new Date()
+      };
+
+      // Add optional fields if provided
+      if (linkedinUrl) updateData.linkedinUrl = sanitizeString(linkedinUrl, 500);
+      if (domain) updateData.domain = sanitizeString(domain, 200);
+      if (industry) updateData.industry = sanitizeString(industry, 100);
+      if (employeeCount) updateData.employeeCount = sanitizeString(employeeCount, 50);
+      if (description) updateData.description = sanitizeString(description, 2000);
+      if (logo) updateData.logo = sanitizeString(logo, 500);
+      if (headquarters) updateData.headquarters = sanitizeString(headquarters, 200);
+      if (website) updateData.website = sanitizeString(website, 500);
+      if (founded) updateData.founded = sanitizeString(founded, 20);
+
+      const result = await companies.updateOne(
+        { normalizedName },
+        {
+          $set: updateData,
+          $setOnInsert: {
+            createdAt: new Date(),
+            source: req.body.source || 'extension'
+          }
+        },
+        { upsert: true }
+      );
+
+      const company = await companies.findOne({ normalizedName });
+
+      res.json({ 
+        success: true, 
+        company: {
+          id: company._id,
+          name: company.name,
+          linkedinUrl: company.linkedinUrl,
+          domain: company.domain,
+          industry: company.industry,
+          employeeCount: company.employeeCount
+        },
+        created: result.upsertedCount > 0
+      });
+
+    } catch (error) {
+      console.error('Company create/update error:', error);
+      res.status(500).json({ success: false, error: 'Failed to save company' });
+    }
+  });
+
+  // ========================================================================
+  // GET /api/companies/:id - Get company details
+  // ========================================================================
+  app.get('/api/companies/:id', async (req, res) => {
+    try {
+      const { ObjectId } = require('mongodb');
+      const companyId = req.params.id;
+
+      let company;
+      
+      // Try to find by ObjectId first, then by normalized name
+      try {
+        company = await companies.findOne({ _id: new ObjectId(companyId) });
+      } catch {
+        company = await companies.findOne({ normalizedName: companyId.toLowerCase() });
+      }
+
+      if (!company) {
+        return res.status(404).json({ success: false, error: 'Company not found' });
+      }
+
+      res.json({ success: true, company });
+
+    } catch (error) {
+      console.error('Get company error:', error);
+      res.status(500).json({ success: false, error: 'Failed to get company' });
     }
   });
 
