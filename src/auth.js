@@ -369,12 +369,12 @@ function setupAuthRoutes(app, db) {
   });
 
   // ========================================================================
-  // POST /api/auth/google - Google OAuth login (FOR PORTAL ONLY)
+  // POST /api/auth/google - Google OAuth login/signup (FOR PORTAL ONLY)
   // This is SEPARATE from extension's Google OAuth - they can coexist
   // ========================================================================
   app.post('/api/auth/google', async (req, res) => {
     try {
-      const { credential } = req.body;
+      const { credential, isLogin, isSignup } = req.body;
 
       if (!credential) {
         return res.status(400).json({ success: false, error: 'Google credential is required' });
@@ -386,27 +386,83 @@ function setupAuthRoutes(app, db) {
         return res.status(401).json({ success: false, error: 'Invalid Google credential' });
       }
 
-      const user = await findOrCreateUser(users, {
-        email: decoded.email.toLowerCase(),
-        name: decoded.name,
-        picture: decoded.picture,
-        googleId: decoded.sub
-      });
+      const normalizedEmail = decoded.email.toLowerCase();
+      const existingUser = await users.findOne({ email: normalizedEmail });
 
-      if (!user.googleId && decoded.sub) {
-        await users.updateOne(
-          { _id: user._id },
-          { 
-            $set: { 
-              googleId: decoded.sub,
-              picture: decoded.picture || user.picture,
-              lastLogin: new Date()
-            } 
-          }
-        );
+      // For login: user must exist
+      if (isLogin && !existingUser) {
+        return res.status(401).json({ 
+          success: false, 
+          error: 'User not found',
+          code: 'USER_NOT_FOUND'
+        });
+      }
+
+      // For signup: user must NOT exist (or allow linking Google to existing account)
+      if (isSignup && existingUser && existingUser.googleId) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Account already exists. Please log in instead.',
+          code: 'USER_EXISTS'
+        });
+      }
+
+      // Find or create user
+      let user;
+      if (existingUser) {
+        // Update existing user with Google info if not already linked
+        if (!existingUser.googleId) {
+          await users.updateOne(
+            { _id: existingUser._id },
+            { 
+              $set: { 
+                googleId: decoded.sub,
+                picture: decoded.picture || existingUser.picture,
+                name: existingUser.name || decoded.name,
+                lastLogin: new Date()
+              } 
+            }
+          );
+        } else {
+          await users.updateOne(
+            { _id: existingUser._id },
+            { $set: { lastLogin: new Date() } }
+          );
+        }
+        user = await users.findOne({ _id: existingUser._id });
+      } else {
+        // Create new user
+        const newUser = {
+          email: normalizedEmail,
+          name: decoded.name || normalizedEmail.split('@')[0],
+          picture: decoded.picture || null,
+          googleId: decoded.sub,
+          password: null, // Google users don't have password initially
+          plan: 'free',
+          features: FREE_PLAN_FEATURES,
+          usage: {
+            leadsScraped: 0,
+            emailsGenerated: 0,
+            dmsGenerated: 0,
+            notesGenerated: 0,
+            crmExports: 0
+          },
+          onboarding: {
+            completed: false
+          },
+          source: 'portal-google',
+          createdAt: new Date(),
+          lastLogin: new Date()
+        };
+
+        const result = await users.insertOne(newUser);
+        user = { ...newUser, _id: result.insertedId };
+        console.log(`👤 New Google user created: ${normalizedEmail}`);
       }
 
       const token = generateToken(user);
+
+      console.log(`🔐 Google auth successful: ${normalizedEmail}`);
 
       res.json({
         success: true,
