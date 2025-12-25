@@ -65,6 +65,7 @@ function setupAuthRoutes(app, db) {
   const users = db.collection('portal_users'); // NEW collection - won't conflict
   const otpCodes = db.collection('otp_codes');
   const companies = db.collection('companies'); // Company details collection
+  const leads = db.collection('leads'); // Use existing leads collection
 
   // Create indexes
   users.createIndex({ email: 1 }, { unique: true }).catch(() => {});
@@ -77,6 +78,10 @@ function setupAuthRoutes(app, db) {
   companies.createIndex({ normalizedName: 1 }).catch(() => {});
   companies.createIndex({ linkedinUrl: 1 }, { sparse: true }).catch(() => {});
   companies.createIndex({ domain: 1 }, { sparse: true }).catch(() => {});
+  
+  // Leads indexes (for portal users)
+  leads.createIndex({ visitorId: 1 }).catch(() => {}); // visitorId = portal userId
+  leads.createIndex({ leadSource: 1 }).catch(() => {});
 
   // ========================================================================
   // POST /api/auth/send-otp - Send OTP to email
@@ -797,10 +802,193 @@ function setupAuthRoutes(app, db) {
     }
   });
 
+  // ========================================================================
+  // GET /api/leads - Get user's saved leads
+  // ========================================================================
+  app.get('/api/leads', authMiddleware(users), async (req, res) => {
+    try {
+      // Use visitorId to match existing leads schema
+      // visitorId can be the user's _id (as string) or email
+      const userLeads = await leads.find({ 
+        $or: [
+          { visitorId: req.user._id.toString() },
+          { visitorId: req.user.email },
+          { visitorEmail: req.user.email }
+        ]
+      })
+        .sort({ createdAt: -1 })
+        .limit(100)
+        .toArray();
+
+      res.json({ success: true, leads: userLeads });
+
+    } catch (error) {
+      console.error('Get leads error:', error);
+      res.status(500).json({ success: false, error: 'Failed to get leads' });
+    }
+  });
+
+  // ========================================================================
+  // GET /api/leads/:id - Get single lead
+  // ========================================================================
+  app.get('/api/leads/:id', authMiddleware(users), async (req, res) => {
+    try {
+      const { ObjectId } = require('mongodb');
+      const lead = await leads.findOne({ 
+        _id: new ObjectId(req.params.id),
+        $or: [
+          { visitorId: req.user._id.toString() },
+          { visitorId: req.user.email },
+          { visitorEmail: req.user.email }
+        ]
+      });
+
+      if (!lead) {
+        return res.status(404).json({ success: false, error: 'Lead not found' });
+      }
+
+      res.json({ success: true, lead });
+
+    } catch (error) {
+      console.error('Get lead error:', error);
+      res.status(500).json({ success: false, error: 'Failed to get lead' });
+    }
+  });
+
+  // ========================================================================
+  // POST /api/leads - Save a new lead (from portal or extension)
+  // ========================================================================
+  app.post('/api/leads', authMiddleware(users), async (req, res) => {
+    try {
+      const { 
+        name, title, company, companyId, location, 
+        linkedinUrl, profilePicture, email, phone,
+        about, leadSource 
+      } = req.body;
+
+      if (!name && !linkedinUrl) {
+        return res.status(400).json({ success: false, error: 'Name or LinkedIn URL required' });
+      }
+
+      // Check for duplicate using visitorId or email
+      if (linkedinUrl) {
+        const existing = await leads.findOne({ 
+          linkedinUrl,
+          $or: [
+            { visitorId: req.user._id.toString() },
+            { visitorId: req.user.email },
+            { visitorEmail: req.user.email }
+          ]
+        });
+        if (existing) {
+          return res.json({ success: true, lead: existing, duplicate: true });
+        }
+      }
+
+      const newLead = {
+        // Use existing schema field names
+        visitorId: req.user._id.toString(),
+        visitorEmail: req.user.email,
+        name: sanitizeString(name, 200),
+        title: sanitizeString(title, 300),
+        company: sanitizeString(company, 200),
+        companyId: companyId || null,
+        location: sanitizeString(location, 200),
+        linkedinUrl: sanitizeString(linkedinUrl, 500),
+        profilePicture: sanitizeString(profilePicture, 500),
+        email: sanitizeString(email, 200),
+        phone: sanitizeString(phone, 50),
+        about: sanitizeString(about, 2000),
+        leadSource: leadSource || 'portal', // 'portal', 'extension', 'import', etc.
+        savedAt: new Date(),
+        createdAt: new Date()
+      };
+
+      const result = await leads.insertOne(newLead);
+      
+      // Increment usage
+      await users.updateOne(
+        { _id: req.user._id },
+        { $inc: { 'usage.leadsScraped': 1 } }
+      );
+
+      res.json({ 
+        success: true, 
+        lead: { ...newLead, _id: result.insertedId }
+      });
+
+    } catch (error) {
+      console.error('Save lead error:', error);
+      res.status(500).json({ success: false, error: 'Failed to save lead' });
+    }
+  });
+
+  // ========================================================================
+  // DELETE /api/leads/:id - Delete a lead
+  // ========================================================================
+  app.delete('/api/leads/:id', authMiddleware(users), async (req, res) => {
+    try {
+      const { ObjectId } = require('mongodb');
+      const result = await leads.deleteOne({ 
+        _id: new ObjectId(req.params.id),
+        $or: [
+          { visitorId: req.user._id.toString() },
+          { visitorId: req.user.email },
+          { visitorEmail: req.user.email }
+        ]
+      });
+
+      if (result.deletedCount === 0) {
+        return res.status(404).json({ success: false, error: 'Lead not found' });
+      }
+
+      res.json({ success: true });
+
+    } catch (error) {
+      console.error('Delete lead error:', error);
+      res.status(500).json({ success: false, error: 'Failed to delete lead' });
+    }
+  });
+
+  // ========================================================================
+  // DELETE /api/user/delete-account - Delete user account
+  // ========================================================================
+  app.delete('/api/user/delete-account', authMiddleware(users), async (req, res) => {
+    try {
+      const userId = req.user._id;
+      const userEmail = req.user.email;
+
+      // Delete user's leads (using visitorId/visitorEmail to match existing schema)
+      await leads.deleteMany({ 
+        $or: [
+          { visitorId: userId.toString() },
+          { visitorId: userEmail },
+          { visitorEmail: userEmail }
+        ]
+      });
+
+      // Delete user (but NOT company - as per requirement)
+      await users.deleteOne({ _id: userId });
+
+      // Delete any OTPs
+      await otpCodes.deleteMany({ email: userEmail });
+
+      console.log(`🗑️ Account deleted: ${userEmail}`);
+
+      res.json({ success: true, message: 'Account deleted successfully' });
+
+    } catch (error) {
+      console.error('Delete account error:', error);
+      res.status(500).json({ success: false, error: 'Failed to delete account' });
+    }
+  });
+
   console.log('✅ Portal Auth routes registered (ADDITIVE - existing routes unchanged)');
   console.log('   Auth endpoints: /api/auth/send-otp, /api/auth/verify-otp, /api/auth/verify-otp-only');
   console.log('   Auth endpoints: /api/auth/signup, /api/auth/login, /api/auth/google');
   console.log('   User endpoints: /api/user/profile, /api/user/features, /api/user/onboarding');
+  console.log('   Leads endpoints: /api/leads (GET, POST, DELETE)');
+  console.log('   Account: /api/user/delete-account');
   console.log(`   Feature gates: ${FEATURE_GATES_ENABLED ? 'ENABLED' : 'DISABLED (safe mode)'}`);
 }
 
