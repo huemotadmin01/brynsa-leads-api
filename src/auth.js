@@ -76,13 +76,26 @@ function setupAuthRoutes(app, db) {
   // ========================================================================
   app.post('/api/auth/send-otp', async (req, res) => {
     try {
-      const { email } = req.body;
+      const { email, isSignup } = req.body;
 
       if (!email || !isValidEmail(email)) {
         return res.status(400).json({ success: false, error: 'Valid email is required' });
       }
 
       const normalizedEmail = email.toLowerCase().trim();
+
+      // Check if user exists (only for signup flow)
+      if (isSignup) {
+        const existingUser = await users.findOne({ email: normalizedEmail });
+        if (existingUser) {
+          return res.status(400).json({ 
+            success: false, 
+            error: 'Account already exists',
+            code: 'USER_EXISTS'
+          });
+        }
+      }
+
       const otp = generateOTP();
       const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000);
 
@@ -98,8 +111,7 @@ function setupAuthRoutes(app, db) {
       // Send OTP via email
       try {
         await resend.emails.send({
-          //from: 'Brynsa <noreply@huemot.com>',
-          from: 'Brynsa <onboarding@resend.dev>',
+          from: 'Brynsa <noreply@huemot.com>',
           to: normalizedEmail,
           subject: 'Your Brynsa verification code',
           html: `
