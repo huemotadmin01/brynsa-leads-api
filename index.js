@@ -21,6 +21,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { MongoClient } = require('mongodb');
+const { setupListsRoutes } = require('./src/lists');
+const { setupPortalLeadsRoutes } = require('./src/portal-leads');
 
 const app = express();
 app.use(cors());
@@ -147,6 +149,8 @@ async function startServer() {
     setupEmailSystem(app, db);
     setupVerificationRoutes(app, db);
     setupAuthRoutes(app, db);
+    setupListsRoutes(app, db);
+setupPortalLeadsRoutes(app, db);
     const leads = db.collection('leads');
     const exportLogs = db.collection('export_logs');
 
