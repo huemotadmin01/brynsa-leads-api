@@ -6,17 +6,8 @@
 // any existing routes or functionality. Your extension will continue
 // to work exactly as before.
 //
-// New endpoints added:
-// - POST /api/auth/send-otp
-// - POST /api/auth/verify-otp  
-// - POST /api/auth/verify-otp-only (for password setup flow)
-// - POST /api/auth/signup (create account with password)
-// - POST /api/auth/login (email + password login)
-// - POST /api/auth/google (for portal, separate from extension OAuth)
-// - GET  /api/user/profile
-// - PUT  /api/user/profile
-// - GET  /api/user/features
-// - POST /api/user/onboarding
+// UPDATED: Routes now use optionalAuthMiddleware for backward compatibility
+// with the old extension that doesn't send auth tokens.
 //
 // ============================================================================
 
@@ -803,9 +794,10 @@ function setupAuthRoutes(app, db) {
   });
 
   // ========================================================================
-  // GET /api/leads - Get user's saved leads
+  // GET /api/portal/leads - Get user's saved leads (PORTAL ONLY - requires auth)
+  // RENAMED to avoid conflict with public /api/leads
   // ========================================================================
-  app.get('/api/leads', authMiddleware(users), async (req, res) => {
+  app.get('/api/portal/leads', authMiddleware(users), async (req, res) => {
     try {
       // Use visitorId to match existing leads schema
       // visitorId can be the user's _id (as string) or email
@@ -829,9 +821,9 @@ function setupAuthRoutes(app, db) {
   });
 
   // ========================================================================
-  // GET /api/leads/:id - Get single lead
+  // GET /api/portal/leads/:id - Get single lead (PORTAL ONLY)
   // ========================================================================
-  app.get('/api/leads/:id', authMiddleware(users), async (req, res) => {
+  app.get('/api/portal/leads/:id', authMiddleware(users), async (req, res) => {
     try {
       const { ObjectId } = require('mongodb');
       const lead = await leads.findOne({ 
@@ -856,9 +848,10 @@ function setupAuthRoutes(app, db) {
   });
 
   // ========================================================================
-  // POST /api/leads - Save a new lead (from portal or extension)
+  // POST /api/portal/leads - Save a new lead (PORTAL ONLY - requires auth)
+  // RENAMED to avoid conflict with public /api/leads
   // ========================================================================
-  app.post('/api/leads', authMiddleware(users), async (req, res) => {
+  app.post('/api/portal/leads', authMiddleware(users), async (req, res) => {
     try {
       const { 
         name, title, company, companyId, location, 
@@ -924,9 +917,9 @@ function setupAuthRoutes(app, db) {
   });
 
   // ========================================================================
-  // DELETE /api/leads/:id - Delete a lead
+  // DELETE /api/portal/leads/:id - Delete a lead (PORTAL ONLY)
   // ========================================================================
-  app.delete('/api/leads/:id', authMiddleware(users), async (req, res) => {
+  app.delete('/api/portal/leads/:id', authMiddleware(users), async (req, res) => {
     try {
       const { ObjectId } = require('mongodb');
       const result = await leads.deleteOne({ 
@@ -987,7 +980,7 @@ function setupAuthRoutes(app, db) {
   console.log('   Auth endpoints: /api/auth/send-otp, /api/auth/verify-otp, /api/auth/verify-otp-only');
   console.log('   Auth endpoints: /api/auth/signup, /api/auth/login, /api/auth/google');
   console.log('   User endpoints: /api/user/profile, /api/user/features, /api/user/onboarding');
-  console.log('   Leads endpoints: /api/leads (GET, POST, DELETE)');
+  console.log('   Portal leads: /api/portal/leads (GET, POST, DELETE) - requires auth');
   console.log('   Account: /api/user/delete-account');
   console.log(`   Feature gates: ${FEATURE_GATES_ENABLED ? 'ENABLED' : 'DISABLED (safe mode)'}`);
 }
