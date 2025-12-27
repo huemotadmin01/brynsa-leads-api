@@ -9,6 +9,9 @@
 // UPDATED: Routes now use optionalAuthMiddleware for backward compatibility
 // with the old extension that doesn't send auth tokens.
 //
+// UPDATE 2: Added automatic lead linking on signup - when a user signs up,
+// their existing leads (by visitorEmail) are automatically linked to their account.
+//
 // ============================================================================
 
 const jwt = require('jsonwebtoken');
@@ -47,6 +50,54 @@ const PRO_PLAN_FEATURES = {
   crmExport: true,
   bulkExport: true,
 };
+
+// ============================================================================
+// HELPER: Link existing leads to new user
+// ============================================================================
+
+async function linkExistingLeadsToUser(userId, userEmail, leadsCollection) {
+  const normalizedEmail = userEmail.toLowerCase().trim();
+  
+  try {
+    const result = await leadsCollection.updateMany(
+      {
+        // Find leads where visitorEmail or userEmail matches
+        // AND userId doesn't exist or is null/empty
+        $and: [
+          {
+            $or: [
+              { visitorEmail: normalizedEmail },
+              { userEmail: normalizedEmail }
+            ]
+          },
+          {
+            $or: [
+              { userId: { $exists: false } },
+              { userId: null },
+              { userId: '' }
+            ]
+          }
+        ]
+      },
+      {
+        $set: {
+          userId: userId.toString(),
+          userEmail: normalizedEmail,
+          linkedAt: new Date()
+        }
+      }
+    );
+
+    if (result.modifiedCount > 0) {
+      console.log(`🔗 Linked ${result.modifiedCount} existing leads to new user: ${normalizedEmail}`);
+    }
+
+    return { success: true, linkedCount: result.modifiedCount };
+  } catch (error) {
+    console.error('Failed to link leads:', error);
+    return { success: false, linkedCount: 0, error: error.message };
+  }
+}
 
 // ============================================================================
 // SETUP AUTH ROUTES (ADDITIVE - doesn't modify existing routes)
@@ -233,6 +284,7 @@ function setupAuthRoutes(app, db) {
 
   // ========================================================================
   // POST /api/auth/signup - Complete signup with name and password
+  // UPDATED: Now automatically links existing leads to new user
   // ========================================================================
   app.post('/api/auth/signup', async (req, res) => {
     try {
@@ -295,19 +347,29 @@ function setupAuthRoutes(app, db) {
 
       const result = await users.insertOne(newUser);
       const user = { ...newUser, _id: result.insertedId };
+      const userId = result.insertedId.toString();
 
       // Delete used OTP
       await otpCodes.deleteMany({ email: normalizedEmail });
 
+      // ================================================================
+      // 🔗 AUTO-LINK EXISTING LEADS TO NEW USER
+      // ================================================================
+      // When a user signs up, automatically find and link any leads
+      // that were created with their email (before they had an account)
+      const linkResult = await linkExistingLeadsToUser(userId, normalizedEmail, leads);
+      // ================================================================
+
       // Generate token
       const token = generateToken(user);
 
-      console.log(`👤 New user signed up: ${normalizedEmail}`);
+      console.log(`👤 New user signed up: ${normalizedEmail}${linkResult.linkedCount > 0 ? ` (linked ${linkResult.linkedCount} existing leads)` : ''}`);
 
       res.json({
         success: true,
         token,
-        user: sanitizeUser(user)
+        user: sanitizeUser(user),
+        linkedLeads: linkResult.linkedCount // Optional: let frontend know how many leads were linked
       });
 
     } catch (error) {
@@ -373,7 +435,7 @@ function setupAuthRoutes(app, db) {
 
   // ========================================================================
   // POST /api/auth/google - Google OAuth login/signup (FOR PORTAL ONLY)
-  // This is SEPARATE from extension's Google OAuth - they can coexist
+  // UPDATED: Now automatically links existing leads for new Google users
   // ========================================================================
   app.post('/api/auth/google', async (req, res) => {
     try {
@@ -412,6 +474,8 @@ function setupAuthRoutes(app, db) {
 
       // Find or create user
       let user;
+      let isNewUser = false;
+      
       if (existingUser) {
         // Update existing user with Google info if not already linked
         if (!existingUser.googleId) {
@@ -435,6 +499,7 @@ function setupAuthRoutes(app, db) {
         user = await users.findOne({ _id: existingUser._id });
       } else {
         // Create new user
+        isNewUser = true;
         const newUser = {
           email: normalizedEmail,
           name: decoded.name || normalizedEmail.split('@')[0],
@@ -463,6 +528,19 @@ function setupAuthRoutes(app, db) {
         console.log(`👤 New Google user created: ${normalizedEmail}`);
       }
 
+      // ================================================================
+      // 🔗 AUTO-LINK EXISTING LEADS FOR NEW GOOGLE USERS
+      // ================================================================
+      let linkedLeadsCount = 0;
+      if (isNewUser) {
+        const linkResult = await linkExistingLeadsToUser(user._id.toString(), normalizedEmail, leads);
+        linkedLeadsCount = linkResult.linkedCount;
+        if (linkedLeadsCount > 0) {
+          console.log(`🔗 Linked ${linkedLeadsCount} existing leads to new Google user: ${normalizedEmail}`);
+        }
+      }
+      // ================================================================
+
       const token = generateToken(user);
 
       console.log(`🔐 Google auth successful: ${normalizedEmail}`);
@@ -470,7 +548,8 @@ function setupAuthRoutes(app, db) {
       res.json({
         success: true,
         token,
-        user: sanitizeUser(user)
+        user: sanitizeUser(user),
+        linkedLeads: linkedLeadsCount // Optional: let frontend know how many leads were linked
       });
 
     } catch (error) {
@@ -805,7 +884,8 @@ function setupAuthRoutes(app, db) {
         $or: [
           { visitorId: req.user._id.toString() },
           { visitorId: req.user.email },
-          { visitorEmail: req.user.email }
+          { visitorEmail: req.user.email },
+          { userId: req.user._id.toString() }  // Also check userId field
         ]
       })
         .sort({ createdAt: -1 })
@@ -831,7 +911,8 @@ function setupAuthRoutes(app, db) {
         $or: [
           { visitorId: req.user._id.toString() },
           { visitorId: req.user.email },
-          { visitorEmail: req.user.email }
+          { visitorEmail: req.user.email },
+          { userId: req.user._id.toString() }
         ]
       });
 
@@ -870,7 +951,8 @@ function setupAuthRoutes(app, db) {
           $or: [
             { visitorId: req.user._id.toString() },
             { visitorId: req.user.email },
-            { visitorEmail: req.user.email }
+            { visitorEmail: req.user.email },
+            { userId: req.user._id.toString() }
           ]
         });
         if (existing) {
@@ -882,6 +964,8 @@ function setupAuthRoutes(app, db) {
         // Use existing schema field names
         visitorId: req.user._id.toString(),
         visitorEmail: req.user.email,
+        userId: req.user._id.toString(),  // Also set userId
+        userEmail: req.user.email,
         name: sanitizeString(name, 200),
         title: sanitizeString(title, 300),
         company: sanitizeString(company, 200),
@@ -927,7 +1011,8 @@ function setupAuthRoutes(app, db) {
         $or: [
           { visitorId: req.user._id.toString() },
           { visitorId: req.user.email },
-          { visitorEmail: req.user.email }
+          { visitorEmail: req.user.email },
+          { userId: req.user._id.toString() }
         ]
       });
 
@@ -951,12 +1036,13 @@ function setupAuthRoutes(app, db) {
       const userId = req.user._id;
       const userEmail = req.user.email;
 
-      // Delete user's leads (using visitorId/visitorEmail to match existing schema)
+      // Delete user's leads (using visitorId/visitorEmail/userId to match existing schema)
       await leads.deleteMany({ 
         $or: [
           { visitorId: userId.toString() },
           { visitorId: userEmail },
-          { visitorEmail: userEmail }
+          { visitorEmail: userEmail },
+          { userId: userId.toString() }
         ]
       });
 
@@ -982,6 +1068,7 @@ function setupAuthRoutes(app, db) {
   console.log('   User endpoints: /api/user/profile, /api/user/features, /api/user/onboarding');
   console.log('   Portal leads: /api/portal/leads (GET, POST, DELETE) - requires auth');
   console.log('   Account: /api/user/delete-account');
+  console.log('   🔗 Auto-linking: Existing leads are automatically linked on signup');
   console.log(`   Feature gates: ${FEATURE_GATES_ENABLED ? 'ENABLED' : 'DISABLED (safe mode)'}`);
 }
 
@@ -1181,6 +1268,7 @@ module.exports = {
   verifyToken,
   generateToken,
   checkFeatureAccess,
+  linkExistingLeadsToUser,  // Export for potential use elsewhere
   FEATURE_GATES_ENABLED,
   FREE_PLAN_FEATURES,
   PRO_PLAN_FEATURES
