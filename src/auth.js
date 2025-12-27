@@ -946,11 +946,11 @@ function setupAuthRoutes(app, db) {
           { visitorId: req.user._id.toString() },
           { visitorId: req.user.email },
           { visitorEmail: req.user.email },
-          { userId: req.user._id.toString() }  // Also check userId field
+          { userId: req.user._id.toString() },  // Also check userId field
+          { sourcedBy: { $regex: new RegExp(`^${escapeRegex(req.user.name || '')}$`, 'i') } }  // Match by name
         ]
       })
         .sort({ createdAt: -1 })
-        .limit(100)
         .toArray();
 
       res.json({ success: true, leads: userLeads });
