@@ -1,8 +1,12 @@
 /**
- * Portal Leads Routes - With User Isolation & Bulk Delete
+ * Portal Leads Routes - FIXED with Consistent userId
  * File: src/portal-leads.js
  * 
- * COPY THIS ENTIRE FILE and paste into src/portal-leads.js
+ * FIXES:
+ * 1. Uses userId consistently (not visitorId)
+ * 2. Checks duplicates using BOTH userId and visitorId for backward compat
+ * 3. Uses consistent field names (companyName, not company)
+ * 4. Properly stores all lead data
  */
 
 const { ObjectId } = require('mongodb');
@@ -16,7 +20,7 @@ function setupPortalLeadsRoutes(app, db) {
   const auth = authMiddleware(usersCollection);
   const optionalAuth = optionalAuthMiddleware(usersCollection);
 
-  console.log('👥 Setting up Portal Leads routes...');
+  console.log('👥 Setting up Portal Leads routes (FIXED)...');
 
   // ==================== GET ALL LEADS ====================
   app.get('/api/portal/leads', auth, async (req, res) => {
@@ -24,15 +28,30 @@ function setupPortalLeadsRoutes(app, db) {
       const userId = req.user._id.toString();
       const { page = 1, limit = 50, listName, search } = req.query;
 
-      const query = { userId };
+      // Query using BOTH userId and visitorId for backward compatibility
+      const query = {
+        $or: [
+          { userId: userId },
+          { visitorId: userId }
+        ]
+      };
+      
       if (listName) query.lists = listName;
       if (search) {
-        query.$or = [
-          { name: { $regex: search, $options: 'i' } },
-          { company: { $regex: search, $options: 'i' } },
-          { companyName: { $regex: search, $options: 'i' } },
-          { email: { $regex: search, $options: 'i' } }
+        const searchQuery = {
+          $or: [
+            { name: { $regex: search, $options: 'i' } },
+            { company: { $regex: search, $options: 'i' } },
+            { companyName: { $regex: search, $options: 'i' } },
+            { email: { $regex: search, $options: 'i' } }
+          ]
+        };
+        // Combine with userId query
+        query.$and = [
+          { $or: [{ userId: userId }, { visitorId: userId }] },
+          searchQuery
         ];
+        delete query.$or;
       }
 
       const total = await leadsCollection.countDocuments(query);
@@ -43,7 +62,13 @@ function setupPortalLeadsRoutes(app, db) {
         .limit(parseInt(limit))
         .toArray();
 
-      res.json({ success: true, leads, total, page: parseInt(page), totalPages: Math.ceil(total / parseInt(limit)) });
+      res.json({ 
+        success: true, 
+        leads, 
+        total, 
+        page: parseInt(page), 
+        totalPages: Math.ceil(total / parseInt(limit)) 
+      });
     } catch (error) {
       console.error('❌ Get leads error:', error);
       res.status(500).json({ success: false, error: 'Failed to get leads' });
@@ -53,7 +78,23 @@ function setupPortalLeadsRoutes(app, db) {
   // ==================== SAVE LEAD ====================
   app.post('/api/portal/leads/save', optionalAuth, async (req, res) => {
     try {
-      const { name, title, company, location, linkedinUrl, email, leadSource, lists } = req.body;
+      const { 
+        name, 
+        title, 
+        headline,
+        company, 
+        companyName,
+        location, 
+        linkedinUrl, 
+        email, 
+        phone,
+        profilePicture,
+        about,
+        currentTitle,
+        sourcedBy,
+        leadSource, 
+        lists 
+      } = req.body;
 
       if (!name) {
         return res.status(400).json({ success: false, error: 'Name is required' });
@@ -61,65 +102,134 @@ function setupPortalLeadsRoutes(app, db) {
 
       const userId = req.user?._id?.toString() || null;
       const userEmail = req.user?.email || null;
+      const userName = req.user?.name || null;
 
       if (!userId) {
         return res.status(401).json({ success: false, error: 'Authentication required' });
       }
 
-      // Check duplicate
+      // Check duplicate - using BOTH userId and visitorId for backward compat
       if (linkedinUrl) {
-        const existing = await leadsCollection.findOne({ linkedinUrl, userId });
+        const existing = await leadsCollection.findOne({ 
+          linkedinUrl,
+          $or: [
+            { userId: userId },
+            { visitorId: userId }
+          ]
+        });
+        
         if (existing) {
+          // Update lists if provided
           if (lists && lists.length > 0) {
             await leadsCollection.updateOne(
               { _id: existing._id },
-              { $addToSet: { lists: { $each: lists } }, $set: { updatedAt: new Date() } }
+              { 
+                $addToSet: { lists: { $each: lists } }, 
+                $set: { updatedAt: new Date() } 
+              }
             );
+            // Ensure lists exist
             for (const listName of lists) {
               await listsCollection.updateOne(
                 { userId, name: listName },
-                { $setOnInsert: { userId, name: listName, createdAt: new Date() }, $set: { updatedAt: new Date() } },
+                { 
+                  $setOnInsert: { userId, name: listName, createdAt: new Date() }, 
+                  $set: { updatedAt: new Date() } 
+                },
                 { upsert: true }
               );
             }
-            return res.json({ success: true, duplicate: true, updated: true, leadId: existing._id });
+            return res.json({ 
+              success: true, 
+              duplicate: true, 
+              updated: true, 
+              leadId: existing._id,
+              message: 'Lead already exists - added to list'
+            });
           }
-          return res.json({ success: true, duplicate: true, lead: existing });
+          return res.json({ 
+            success: true, 
+            duplicate: true, 
+            lead: existing,
+            message: 'Lead already exists'
+          });
         }
       }
 
+      // Determine company name (handle both field names)
+      const finalCompanyName = sanitizeString(companyName || company, 200) || null;
+      
+      // Determine sourcedBy (from request or user name)
+      const finalSourcedBy = sanitizeString(sourcedBy, 200) || userName || null;
+
+      // Create new lead with CONSISTENT field names
       const newLead = {
+        // User identification - use userId (not visitorId)
         userId,
         userEmail,
+        
+        // Also store visitorId for backward compatibility with old code
+        visitorId: userId,
+        visitorEmail: userEmail,
+        
+        // Lead data - use consistent field names
         name: sanitizeString(name, 200),
+        email: sanitizeString(email, 200) || null,
+        
+        // Company - store in BOTH fields for compatibility
+        companyName: finalCompanyName,
+        company: finalCompanyName,
+        
+        // Title/headline
+        headline: sanitizeString(headline || title, 500) || null,
+        currentTitle: sanitizeString(currentTitle || title, 300) || null,
         title: sanitizeString(title, 300) || null,
-        company: sanitizeString(company, 200) || null,
-        companyName: sanitizeString(company, 200) || null,
+        
+        // Other fields
         location: sanitizeString(location, 200) || null,
         linkedinUrl: sanitizeString(linkedinUrl, 500) || null,
-        email: sanitizeString(email, 200) || null,
+        phone: sanitizeString(phone, 50) || null,
+        profilePicture: sanitizeString(profilePicture, 500) || null,
+        about: sanitizeString(about, 2000) || null,
+        
+        // Sourcing
+        sourcedBy: finalSourcedBy,
         leadSource: leadSource || 'extension',
+        
+        // Lists
         lists: lists || [],
+        
+        // Timestamps
         createdAt: new Date(),
-        updatedAt: new Date()
+        updatedAt: new Date(),
+        savedAt: new Date()
       };
 
       const result = await leadsCollection.insertOne(newLead);
 
+      // Create lists if provided
       if (lists && lists.length > 0) {
         for (const listName of lists) {
           await listsCollection.updateOne(
             { userId, name: listName },
-            { $setOnInsert: { userId, name: listName, createdAt: new Date() }, $set: { updatedAt: new Date() } },
+            { 
+              $setOnInsert: { userId, name: listName, createdAt: new Date() }, 
+              $set: { updatedAt: new Date() } 
+            },
             { upsert: true }
           );
         }
       }
 
-      await usersCollection.updateOne({ _id: req.user._id }, { $inc: { 'usage.leadsScraped': 1 } });
+      // Increment usage
+      await usersCollection.updateOne(
+        { _id: req.user._id }, 
+        { $inc: { 'usage.leadsScraped': 1 } }
+      );
 
-      console.log(`✅ Lead saved: ${name}`);
+      console.log(`✅ Lead saved: ${name} by ${userEmail} (userId: ${userId})`);
       res.json({ success: true, lead: { ...newLead, _id: result.insertedId } });
+      
     } catch (error) {
       console.error('❌ Save lead error:', error);
       res.status(500).json({ success: false, error: 'Failed to save lead' });
@@ -132,7 +242,10 @@ function setupPortalLeadsRoutes(app, db) {
       const userId = req.user._id.toString();
       const result = await leadsCollection.deleteOne({
         _id: new ObjectId(req.params.id),
-        userId
+        $or: [
+          { userId: userId },
+          { visitorId: userId }
+        ]
       });
 
       if (result.deletedCount === 0) {
@@ -163,7 +276,10 @@ function setupPortalLeadsRoutes(app, db) {
 
       const result = await leadsCollection.deleteMany({
         _id: { $in: objectIds },
-        userId
+        $or: [
+          { userId: userId },
+          { visitorId: userId }
+        ]
       });
 
       console.log(`✅ Bulk deleted ${result.deletedCount} leads by ${req.user.email}`);
@@ -185,14 +301,20 @@ function setupPortalLeadsRoutes(app, db) {
       }
 
       await leadsCollection.updateOne(
-        { _id: new ObjectId(req.params.id), userId },
+        { 
+          _id: new ObjectId(req.params.id), 
+          $or: [{ userId }, { visitorId: userId }]
+        },
         { $set: { lists, updatedAt: new Date() } }
       );
 
       for (const listName of lists) {
         await listsCollection.updateOne(
           { userId, name: listName },
-          { $setOnInsert: { userId, name: listName, createdAt: new Date() }, $set: { updatedAt: new Date() } },
+          { 
+            $setOnInsert: { userId, name: listName, createdAt: new Date() }, 
+            $set: { updatedAt: new Date() } 
+          },
           { upsert: true }
         );
       }
@@ -209,8 +331,14 @@ function setupPortalLeadsRoutes(app, db) {
     try {
       const userId = req.user._id.toString();
       await leadsCollection.updateOne(
-        { _id: new ObjectId(req.params.id), userId },
-        { $pull: { lists: decodeURIComponent(req.params.listName) }, $set: { updatedAt: new Date() } }
+        { 
+          _id: new ObjectId(req.params.id), 
+          $or: [{ userId }, { visitorId: userId }]
+        },
+        { 
+          $pull: { lists: decodeURIComponent(req.params.listName) }, 
+          $set: { updatedAt: new Date() } 
+        }
       );
       res.json({ success: true });
     } catch (error) {
@@ -219,17 +347,46 @@ function setupPortalLeadsRoutes(app, db) {
     }
   });
 
-  // Create indexes
+  // ==================== GET SINGLE LEAD ====================
+  app.get('/api/portal/leads/:id', auth, async (req, res) => {
+    try {
+      const userId = req.user._id.toString();
+      const lead = await leadsCollection.findOne({
+        _id: new ObjectId(req.params.id),
+        $or: [
+          { userId: userId },
+          { visitorId: userId }
+        ]
+      });
+
+      if (!lead) {
+        return res.status(404).json({ success: false, error: 'Lead not found' });
+      }
+
+      res.json({ success: true, lead });
+    } catch (error) {
+      console.error('❌ Get lead error:', error);
+      res.status(500).json({ success: false, error: 'Failed to get lead' });
+    }
+  });
+
+  // Create indexes for better performance
   leadsCollection.createIndex({ userId: 1, createdAt: -1 }).catch(() => {});
+  leadsCollection.createIndex({ visitorId: 1, createdAt: -1 }).catch(() => {});
   leadsCollection.createIndex({ userId: 1, linkedinUrl: 1 }).catch(() => {});
+  leadsCollection.createIndex({ visitorId: 1, linkedinUrl: 1 }).catch(() => {});
   leadsCollection.createIndex({ userId: 1, lists: 1 }).catch(() => {});
 
-  console.log('✅ Portal Leads routes registered');
+  console.log('✅ Portal Leads routes registered (FIXED with consistent userId)');
 }
 
 function sanitizeString(str, maxLength = 500) {
   if (!str) return '';
-  return String(str).replace(/<[^>]*>/g, '').replace(/['"\\]/g, '').trim().substring(0, maxLength);
+  return String(str)
+    .replace(/<[^>]*>/g, '')
+    .replace(/['"\\]/g, '')
+    .trim()
+    .substring(0, maxLength);
 }
 
 module.exports = { setupPortalLeadsRoutes };
