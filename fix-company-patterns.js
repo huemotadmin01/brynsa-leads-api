@@ -1,48 +1,63 @@
 // ============================================================================
-// fix-company-patterns.js - MongoDB Cleanup Script
+// fix-company-patterns-v2.js - Fix Company Pattern Domain Mismatches
 // ============================================================================
 // 
-// This script identifies and fixes incorrect company data in your database:
-// 1. Leads with previous employer instead of current company
-// 2. Incorrect email patterns derived from wrong company data
-// 3. Orphaned/invalid company_patterns entries
+// This script fixes the company_patterns collection by:
+// 1. Finding patterns where domain doesn't match company name
+// 2. Deleting patterns with low confidence OR domain mismatch
+// 3. Rebuilding patterns from verified scraped emails only
 //
-// RUN: node fix-company-patterns.js
-// DRY RUN (no changes): DRY_RUN=true node fix-company-patterns.js
+// RUN: node fix-company-patterns-v2.js
+// DRY RUN: DRY_RUN=true node fix-company-patterns-v2.js
 // ============================================================================
 
-const { MongoClient, ObjectId } = require("mongodb");
+const { MongoClient } = require("mongodb");
 require('dotenv').config();
 
 const client = new MongoClient(process.env.MONGO_URL);
 const DRY_RUN = process.env.DRY_RUN === 'true';
 
-// Known incorrect patterns to look for
-const SUSPICIOUS_PATTERNS = [
-  // Generic/placeholder companies
-  /^(company|unknown|n\/a|na|none|null|undefined|test|demo|sample)$/i,
-  // Clearly wrong - previous job indicators
-  /^(former|ex-|previously|past|left|resigned)/i,
-  // Too short (likely extraction errors)
-  /^.{1,2}$/,
-  // All numbers
-  /^\d+$/,
-  // Email-like strings stored as company
-  /@/,
-  // URL fragments
-  /^(http|www\.|\.com|\.in|\.io)/i,
-];
+// Public email domains that should never be in company_patterns
+const PUBLIC_DOMAINS = new Set([
+  'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'live.com',
+  'aol.com', 'icloud.com', 'mail.com', 'protonmail.com', 'zoho.com',
+  'ymail.com', 'msn.com', 'rediffmail.com', 'inbox.com'
+]);
 
-// Common patterns that indicate extraction grabbed wrong data
-const PREVIOUS_EMPLOYER_INDICATORS = [
-  'former', 'ex-', 'previously at', 'left', 'resigned', 
-  'past experience', 'worked at', 'was at'
-];
+// Known company -> domain mappings (add more as needed)
+const KNOWN_COMPANY_DOMAINS = {
+  'deel': ['deel.com', 'letsdeel.com'],
+  'hofy': ['hofy.com', 'hofy.co'],
+  'google': ['google.com'],
+  'microsoft': ['microsoft.com'],
+  'amazon': ['amazon.com'],
+  'meta': ['meta.com', 'fb.com', 'facebook.com'],
+  'apple': ['apple.com'],
+  'netflix': ['netflix.com'],
+  'uber': ['uber.com'],
+  'airbnb': ['airbnb.com'],
+  'stripe': ['stripe.com'],
+  'slack': ['slack.com'],
+  'zoom': ['zoom.us'],
+  'salesforce': ['salesforce.com'],
+  'hubspot': ['hubspot.com'],
+  'atlassian': ['atlassian.com'],
+  'shopify': ['shopify.com'],
+  'twitter': ['twitter.com', 'x.com'],
+  'linkedin': ['linkedin.com'],
+  'adobe': ['adobe.com'],
+  'oracle': ['oracle.com'],
+  'ibm': ['ibm.com'],
+  'intel': ['intel.com'],
+  'nvidia': ['nvidia.com'],
+  'tesla': ['tesla.com'],
+  'spacex': ['spacex.com'],
+};
 
-async function analyzeAndFix() {
+async function fixCompanyPatterns() {
   const start = Date.now();
   console.log(`\n${'='.repeat(70)}`);
-  console.log(`  MONGODB COMPANY DATA CLEANUP ${DRY_RUN ? '(DRY RUN - NO CHANGES)' : ''}`);
+  console.log(`  COMPANY PATTERNS CLEANUP v2.0 ${DRY_RUN ? '(DRY RUN)' : ''}`);
   console.log(`${'='.repeat(70)}\n`);
 
   try {
@@ -50,310 +65,153 @@ async function analyzeAndFix() {
     console.log('✅ Connected to MongoDB\n');
 
     const db = client.db("brynsaleads");
-    const leads = db.collection("leads");
     const patterns = db.collection("company_patterns");
-    const audit = db.collection("enriched_audit");
+    const leads = db.collection("leads");
 
     const stats = {
-      totalLeads: 0,
-      suspiciousCompanies: [],
-      fixedLeads: 0,
+      totalPatterns: 0,
+      publicDomainPatterns: 0,
+      domainMismatchPatterns: 0,
+      lowConfidencePatterns: 0,
       deletedPatterns: 0,
-      deletedAudits: 0,
-      emailsCleared: 0
+      rebuiltPatterns: 0
     };
 
     // ========================================================================
-    // PHASE 1: Analyze Current State
+    // PHASE 1: Analyze All Patterns
     // ========================================================================
-    console.log('📊 PHASE 1: Analyzing current database state...\n');
+    console.log('📊 PHASE 1: Analyzing all company patterns...\n');
 
-    stats.totalLeads = await leads.countDocuments();
-    const totalPatterns = await patterns.countDocuments();
-    const totalAudits = await audit.countDocuments();
+    const allPatterns = await patterns.find({}).toArray();
+    stats.totalPatterns = allPatterns.length;
+    console.log(`   Total patterns: ${stats.totalPatterns}\n`);
 
-    console.log(`   Total leads: ${stats.totalLeads}`);
-    console.log(`   Total company patterns: ${totalPatterns}`);
-    console.log(`   Total enrichment audits: ${totalAudits}`);
+    const patternsToDelete = [];
+    const suspiciousPatterns = [];
 
-    // ========================================================================
-    // PHASE 2: Find Suspicious Company Names
-    // ========================================================================
-    console.log('\n📊 PHASE 2: Finding suspicious company names...\n');
+    for (const pattern of allPatterns) {
+      const companyName = pattern.companyName || '';
+      const domain = pattern.domain || '';
+      const confidence = pattern.confidence || 0;
+      const normalizedCompany = normalizeForComparison(companyName);
+      const normalizedDomain = domain.replace(/\.(com|co|io|in|net|org|ai|tech)$/i, '').toLowerCase();
 
-    // Get distinct company names
-    const companyNames = await leads.distinct('companyName');
-    console.log(`   Found ${companyNames.length} unique company names\n`);
+      let deleteReason = null;
 
-    const suspiciousCompanies = new Set();
-
-    for (const company of companyNames) {
-      if (!company) {
-        suspiciousCompanies.add('[NULL/EMPTY]');
-        continue;
+      // Check 1: Public email domain
+      if (PUBLIC_DOMAINS.has(domain.toLowerCase())) {
+        deleteReason = 'public_domain';
+        stats.publicDomainPatterns++;
       }
 
-      // Check against suspicious patterns
-      for (const pattern of SUSPICIOUS_PATTERNS) {
-        if (pattern.test(company)) {
-          suspiciousCompanies.add(company);
-          break;
+      // Check 2: Known company with wrong domain
+      if (!deleteReason) {
+        const knownDomains = KNOWN_COMPANY_DOMAINS[normalizedCompany];
+        if (knownDomains && !knownDomains.includes(domain.toLowerCase())) {
+          deleteReason = `known_mismatch (expected: ${knownDomains.join(' or ')})`;
+          stats.domainMismatchPatterns++;
         }
       }
 
-      // Check for previous employer indicators
-      const lowerCompany = company.toLowerCase();
-      for (const indicator of PREVIOUS_EMPLOYER_INDICATORS) {
-        if (lowerCompany.includes(indicator)) {
-          suspiciousCompanies.add(company);
-          break;
-        }
-      }
-    }
+      // Check 3: Domain doesn't contain any part of company name (and vice versa)
+      if (!deleteReason && normalizedCompany.length >= 3 && normalizedDomain.length >= 3) {
+        const hasOverlap = 
+          normalizedCompany.includes(normalizedDomain) ||
+          normalizedDomain.includes(normalizedCompany) ||
+          normalizedDomain.includes(normalizedCompany.substring(0, Math.min(4, normalizedCompany.length))) ||
+          normalizedCompany.includes(normalizedDomain.substring(0, Math.min(4, normalizedDomain.length)));
 
-    stats.suspiciousCompanies = Array.from(suspiciousCompanies);
-    console.log(`   Found ${stats.suspiciousCompanies.length} suspicious company names:`);
-    stats.suspiciousCompanies.slice(0, 20).forEach(c => console.log(`      - "${c}"`));
-    if (stats.suspiciousCompanies.length > 20) {
-      console.log(`      ... and ${stats.suspiciousCompanies.length - 20} more`);
-    }
-
-    // ========================================================================
-    // PHASE 3: Find Email-Company Mismatches
-    // ========================================================================
-    console.log('\n📊 PHASE 3: Finding email-company mismatches...\n');
-
-    // Find leads where email domain doesn't match company
-    const emailMismatchPipeline = [
-      {
-        $match: {
-          email: { $exists: true, $ne: null, $ne: '', $ne: 'noemail@domain.com' },
-          companyName: { $exists: true, $ne: null, $ne: '' },
-          emailEnriched: true // Only check enriched emails
-        }
-      },
-      {
-        $project: {
-          name: 1,
-          email: 1,
-          companyName: 1,
-          linkedinUrl: 1,
-          emailDomain: { $arrayElemAt: [{ $split: ['$email', '@'] }, 1] }
-        }
-      },
-      {
-        $limit: 1000
-      }
-    ];
-
-    const emailMismatches = await leads.aggregate(emailMismatchPipeline).toArray();
-    
-    const suspiciousMismatches = [];
-    for (const lead of emailMismatches) {
-      if (!lead.emailDomain || !lead.companyName) continue;
-      
-      // Extract company name parts for comparison
-      const companyLower = lead.companyName.toLowerCase()
-        .replace(/[^a-z0-9]/g, '')
-        .replace(/(pvt|ltd|llc|inc|corp|limited|private|llp|technologies|technology|tech|solutions|consulting|services|india|global)/g, '');
-      
-      const domainLower = lead.emailDomain.toLowerCase()
-        .replace(/\.(com|in|io|co|net|org|edu)$/g, '')
-        .replace(/[^a-z0-9]/g, '');
-
-      // Check if domain has any overlap with company name
-      const hasOverlap = companyLower.includes(domainLower) || 
-                         domainLower.includes(companyLower) ||
-                         (companyLower.length > 3 && domainLower.includes(companyLower.substring(0, 4)));
-
-      if (!hasOverlap && companyLower.length > 3 && domainLower.length > 3) {
-        suspiciousMismatches.push({
-          _id: lead._id,
-          name: lead.name,
-          company: lead.companyName,
-          email: lead.email,
-          domain: lead.emailDomain
-        });
-      }
-    }
-
-    console.log(`   Found ${suspiciousMismatches.length} potential email-company mismatches:`);
-    suspiciousMismatches.slice(0, 10).forEach(m => {
-      console.log(`      - ${m.name}: ${m.company} ↔ ${m.email}`);
-    });
-    if (suspiciousMismatches.length > 10) {
-      console.log(`      ... and ${suspiciousMismatches.length - 10} more`);
-    }
-
-    // ========================================================================
-    // PHASE 4: Find Invalid Patterns
-    // ========================================================================
-    console.log('\n📊 PHASE 4: Finding invalid company patterns...\n');
-
-    const invalidPatterns = await patterns.find({
-      $or: [
-        { companyName: { $in: stats.suspiciousCompanies } },
-        { domain: { $in: ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com'] } },
-        { confidence: { $lt: 0.5 } },
-        { frequency: { $lt: 2 } }
-      ]
-    }).toArray();
-
-    console.log(`   Found ${invalidPatterns.length} invalid/low-confidence patterns:`);
-    invalidPatterns.slice(0, 10).forEach(p => {
-      console.log(`      - ${p.companyName}: ${p.pattern}@${p.domain} (conf: ${p.confidence?.toFixed(2) || '?'})`);
-    });
-
-    // ========================================================================
-    // PHASE 5: Apply Fixes (if not dry run)
-    // ========================================================================
-    console.log(`\n📊 PHASE 5: ${DRY_RUN ? 'Would apply' : 'Applying'} fixes...\n`);
-
-    if (!DRY_RUN) {
-      // 5a. Delete invalid patterns
-      if (invalidPatterns.length > 0) {
-        const patternIds = invalidPatterns.map(p => p._id);
-        const deletePatterns = await patterns.deleteMany({ _id: { $in: patternIds } });
-        stats.deletedPatterns = deletePatterns.deletedCount;
-        console.log(`   ✅ Deleted ${stats.deletedPatterns} invalid patterns`);
-      }
-
-      // 5b. Clear enriched emails that are likely wrong (from mismatches)
-      if (suspiciousMismatches.length > 0) {
-        const mismatchIds = suspiciousMismatches.map(m => m._id);
-        const clearEmails = await leads.updateMany(
-          { _id: { $in: mismatchIds } },
-          { 
-            $set: { 
-              email: 'noemail@domain.com',
-              emailEnriched: false,
-              emailCleared: true,
-              emailClearedReason: 'company_mismatch',
-              emailClearedAt: new Date()
-            }
-          }
-        );
-        stats.emailsCleared = clearEmails.modifiedCount;
-        console.log(`   ✅ Cleared ${stats.emailsCleared} mismatched enriched emails`);
-      }
-
-      // 5c. Delete audit records for suspicious companies
-      if (stats.suspiciousCompanies.length > 0) {
-        const deleteAudits = await audit.deleteMany({
-          companyName: { $in: stats.suspiciousCompanies }
-        });
-        stats.deletedAudits = deleteAudits.deletedCount;
-        console.log(`   ✅ Deleted ${stats.deletedAudits} audit records for suspicious companies`);
-      }
-
-      // 5d. Mark leads with suspicious companies for review
-      const markForReview = await leads.updateMany(
-        { 
-          companyName: { $in: stats.suspiciousCompanies },
-          needsReview: { $ne: true }
-        },
-        {
-          $set: {
-            needsReview: true,
-            reviewReason: 'suspicious_company',
-            reviewFlaggedAt: new Date()
+        if (!hasOverlap) {
+          // Also check if domain is completely unrelated
+          const similarity = calculateSimilarity(normalizedCompany, normalizedDomain);
+          if (similarity < 0.3) {
+            deleteReason = `domain_mismatch (${normalizedCompany} ↔ ${normalizedDomain}, similarity: ${(similarity * 100).toFixed(0)}%)`;
+            stats.domainMismatchPatterns++;
           }
         }
-      );
-      stats.fixedLeads = markForReview.modifiedCount;
-      console.log(`   ✅ Marked ${stats.fixedLeads} leads for manual review`);
-    } else {
-      console.log('   ⏸️  DRY RUN - No changes made');
-      console.log(`   Would delete ${invalidPatterns.length} patterns`);
-      console.log(`   Would clear ${suspiciousMismatches.length} mismatched emails`);
-      console.log(`   Would mark ${stats.suspiciousCompanies.length} leads for review`);
+      }
+
+      // Check 4: Low confidence (below 0.7)
+      if (!deleteReason && confidence < 0.7) {
+        deleteReason = `low_confidence (${confidence.toFixed(2)})`;
+        stats.lowConfidencePatterns++;
+      }
+
+      if (deleteReason) {
+        patternsToDelete.push({
+          _id: pattern._id,
+          companyName: pattern.companyName,
+          domain: pattern.domain,
+          confidence: pattern.confidence,
+          reason: deleteReason
+        });
+      } else {
+        // Check for suspicious but not auto-delete
+        if (confidence < 0.8) {
+          suspiciousPatterns.push({
+            companyName: pattern.companyName,
+            domain: pattern.domain,
+            confidence: pattern.confidence
+          });
+        }
+      }
     }
 
     // ========================================================================
-    // PHASE 6: Generate Report
+    // PHASE 2: Show Patterns to Delete
     // ========================================================================
-    console.log(`\n${'='.repeat(70)}`);
-    console.log('  CLEANUP SUMMARY');
-    console.log(`${'='.repeat(70)}`);
-    console.log(`\n   Total leads analyzed: ${stats.totalLeads}`);
-    console.log(`   Suspicious companies found: ${stats.suspiciousCompanies.length}`);
-    console.log(`   Email-company mismatches: ${suspiciousMismatches.length}`);
-    console.log(`   Invalid patterns: ${invalidPatterns.length}`);
-    
-    if (!DRY_RUN) {
-      console.log(`\n   CHANGES MADE:`);
-      console.log(`   - Patterns deleted: ${stats.deletedPatterns}`);
-      console.log(`   - Emails cleared: ${stats.emailsCleared}`);
-      console.log(`   - Audit records deleted: ${stats.deletedAudits}`);
-      console.log(`   - Leads marked for review: ${stats.fixedLeads}`);
-    }
+    console.log('📊 PHASE 2: Patterns to delete...\n');
+    console.log(`   Found ${patternsToDelete.length} patterns to delete:\n`);
 
-    console.log(`\n   Duration: ${((Date.now() - start) / 1000).toFixed(1)}s`);
-    console.log(`${'='.repeat(70)}\n`);
-
-    // Return stats for programmatic use
-    return stats;
-
-  } catch (error) {
-    console.error('❌ Cleanup error:', error);
-    throw error;
-  } finally {
-    await client.close();
-    console.log('🔌 Disconnected from MongoDB\n');
-  }
-}
-
-// ============================================================================
-// Additional Utility Functions
-// ============================================================================
-
-async function listSuspiciousLeads(limit = 50) {
-  try {
-    await client.connect();
-    const db = client.db("brynsaleads");
-    const leads = db.collection("leads");
-
-    const suspiciousLeads = await leads.find({
-      $or: [
-        { companyName: { $exists: false } },
-        { companyName: null },
-        { companyName: '' },
-        { needsReview: true }
-      ]
-    }).limit(limit).toArray();
-
-    console.log(`\nLeads needing review (${suspiciousLeads.length}):\n`);
-    suspiciousLeads.forEach(lead => {
-      console.log(`  ${lead.name} | ${lead.companyName || '[NO COMPANY]'} | ${lead.email || '[NO EMAIL]'}`);
-      if (lead.linkedinUrl) console.log(`    LinkedIn: ${lead.linkedinUrl}`);
+    patternsToDelete.forEach((p, i) => {
+      if (i < 30) {
+        console.log(`   ${i + 1}. ${p.companyName} → ${p.domain}`);
+        console.log(`      Reason: ${p.reason}`);
+      }
     });
+    if (patternsToDelete.length > 30) {
+      console.log(`   ... and ${patternsToDelete.length - 30} more\n`);
+    }
 
-  } finally {
-    await client.close();
-  }
-}
+    // ========================================================================
+    // PHASE 3: Delete Invalid Patterns
+    // ========================================================================
+    console.log('\n📊 PHASE 3: Deleting invalid patterns...\n');
 
-async function rebuildPatternsFromVerifiedEmails() {
-  console.log('\n🔄 Rebuilding patterns from verified emails only...\n');
-  
-  try {
-    await client.connect();
-    const db = client.db("brynsaleads");
-    const leads = db.collection("leads");
-    const patterns = db.collection("company_patterns");
+    if (!DRY_RUN && patternsToDelete.length > 0) {
+      const idsToDelete = patternsToDelete.map(p => p._id);
+      const deleteResult = await patterns.deleteMany({ _id: { $in: idsToDelete } });
+      stats.deletedPatterns = deleteResult.deletedCount;
+      console.log(`   ✅ Deleted ${stats.deletedPatterns} invalid patterns`);
+    } else if (DRY_RUN) {
+      console.log(`   ⏸️  DRY RUN - Would delete ${patternsToDelete.length} patterns`);
+    }
 
-    // Clear existing patterns
-    await patterns.deleteMany({});
-    console.log('   Cleared existing patterns');
+    // ========================================================================
+    // PHASE 4: Rebuild Patterns from Scraped (Non-Enriched) Emails
+    // ========================================================================
+    console.log('\n📊 PHASE 4: Rebuilding patterns from scraped emails...\n');
 
-    // Find leads with verified, non-enriched emails
-    const verifiedLeads = await leads.aggregate([
+    // Get companies that were deleted and need rebuilding
+    const deletedCompanies = patternsToDelete.map(p => p.companyName);
+
+    // Find leads with scraped emails (not enriched) for these companies
+    const scrapedEmailLeads = await leads.aggregate([
       {
         $match: {
-          email: { $exists: true, $ne: null, $ne: '', $ne: 'noemail@domain.com' },
-          companyName: { $exists: true, $ne: null, $ne: '' },
-          emailEnriched: { $ne: true },
-          emailVerified: { $ne: false }
+          companyName: { $in: deletedCompanies },
+          email: { 
+            $exists: true, 
+            $ne: null, 
+            $ne: '', 
+            $ne: 'noemail@domain.com',
+            $not: { $regex: /@(gmail|yahoo|hotmail|outlook|live|aol|icloud)\.com$/i }
+          },
+          // Only use emails that were scraped directly, not enriched
+          $or: [
+            { emailEnriched: { $ne: true } },
+            { emailSource: 'scraped' }
+          ]
         }
       },
       {
@@ -364,51 +222,96 @@ async function rebuildPatternsFromVerifiedEmails() {
         }
       },
       {
-        $match: { count: { $gte: 2 } } // Only companies with 2+ verified emails
+        $match: { count: { $gte: 2 } } // Only rebuild if 2+ verified emails exist
       }
     ]).toArray();
 
-    console.log(`   Found ${verifiedLeads.length} companies with verified emails`);
+    console.log(`   Found ${scrapedEmailLeads.length} companies with scraped emails to rebuild`);
 
-    let patternsCreated = 0;
-    for (const company of verifiedLeads) {
-      const patternInfo = extractMostCommonPattern(company.leads);
-      if (patternInfo) {
-        await patterns.updateOne(
-          { companyName: company._id },
-          {
-            $set: {
-              companyName: company._id,
-              normalizedName: normalizeCompanyName(company._id),
-              pattern: patternInfo.pattern,
-              domain: patternInfo.domain,
-              confidence: patternInfo.confidence,
-              frequency: company.count,
-              source: 'verified_rebuild',
-              updatedAt: new Date()
+    if (!DRY_RUN) {
+      for (const company of scrapedEmailLeads) {
+        const patternInfo = extractMostCommonPattern(company.leads);
+        if (patternInfo && !PUBLIC_DOMAINS.has(patternInfo.domain)) {
+          await patterns.updateOne(
+            { companyName: company._id },
+            {
+              $set: {
+                companyName: company._id,
+                normalizedName: normalizeForComparison(company._id),
+                pattern: patternInfo.pattern,
+                domain: patternInfo.domain,
+                confidence: patternInfo.confidence,
+                frequency: company.count,
+                source: 'scraped_rebuild_v2',
+                updatedAt: new Date()
+              },
+              $setOnInsert: { createdAt: new Date() }
             },
-            $setOnInsert: { createdAt: new Date() }
-          },
-          { upsert: true }
-        );
-        patternsCreated++;
+            { upsert: true }
+          );
+          stats.rebuiltPatterns++;
+          console.log(`   ✅ Rebuilt: ${company._id} → ${patternInfo.pattern}@${patternInfo.domain}`);
+        }
       }
+    } else {
+      console.log(`   ⏸️  DRY RUN - Would rebuild ${scrapedEmailLeads.length} patterns`);
     }
 
-    console.log(`   ✅ Created ${patternsCreated} verified patterns`);
+    // ========================================================================
+    // PHASE 5: Summary
+    // ========================================================================
+    console.log(`\n${'='.repeat(70)}`);
+    console.log('  CLEANUP SUMMARY');
+    console.log(`${'='.repeat(70)}`);
+    console.log(`\n   Total patterns analyzed: ${stats.totalPatterns}`);
+    console.log(`   Public domain patterns: ${stats.publicDomainPatterns}`);
+    console.log(`   Domain mismatch patterns: ${stats.domainMismatchPatterns}`);
+    console.log(`   Low confidence patterns: ${stats.lowConfidencePatterns}`);
+    console.log(`   ---`);
+    console.log(`   Patterns deleted: ${DRY_RUN ? `(would be) ${patternsToDelete.length}` : stats.deletedPatterns}`);
+    console.log(`   Patterns rebuilt: ${DRY_RUN ? `(would be) ${scrapedEmailLeads.length}` : stats.rebuiltPatterns}`);
+    console.log(`\n   Duration: ${((Date.now() - start) / 1000).toFixed(1)}s`);
 
+    // Show remaining suspicious patterns
+    if (suspiciousPatterns.length > 0) {
+      console.log(`\n   ⚠️  ${suspiciousPatterns.length} suspicious patterns remaining (review manually):`);
+      suspiciousPatterns.slice(0, 10).forEach(p => {
+        console.log(`      - ${p.companyName} → ${p.domain} (conf: ${p.confidence?.toFixed(2)})`);
+      });
+    }
+
+    console.log(`\n${'='.repeat(70)}\n`);
+
+    return stats;
+
+  } catch (error) {
+    console.error('❌ Error:', error);
+    throw error;
   } finally {
     await client.close();
+    console.log('🔌 Disconnected from MongoDB\n');
   }
 }
 
-// Helper functions
-function normalizeCompanyName(name) {
-  return String(name || '')
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+function normalizeForComparison(str) {
+  return String(str || '')
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '')
-    .replace(/(pvt|ltd|llc|inc|corp|limited|private|llp)$/g, '')
+    .replace(/(pvt|ltd|llc|inc|corp|limited|private|llp|technologies|technology|tech|solutions|consulting|services|india|global|software|systems|group|co)$/g, '')
     .trim();
+}
+
+function calculateSimilarity(str1, str2) {
+  // Simple Jaccard-like similarity
+  const set1 = new Set(str1.split(''));
+  const set2 = new Set(str2.split(''));
+  const intersection = new Set([...set1].filter(x => set2.has(x)));
+  const union = new Set([...set1, ...set2]);
+  return intersection.size / union.size;
 }
 
 function extractMostCommonPattern(leads) {
@@ -448,7 +351,9 @@ function extractPatternFromEmail(email, fullName) {
     { name: 'first_last', template: `${first}_${last}`, confidence: 0.90 },
     { name: 'firstlast', template: `${first}${last}`, confidence: 0.85 },
     { name: 'f.last', template: `${first[0]}.${last}`, confidence: 0.80 },
-    { name: 'flast', template: `${first[0]}${last}`, confidence: 0.70 }
+    { name: 'flast', template: `${first[0]}${last}`, confidence: 0.75 },
+    { name: 'first', template: first, confidence: 0.60 },
+    { name: 'last', template: last, confidence: 0.55 }
   ];
 
   for (const p of patterns) {
@@ -479,17 +384,9 @@ function splitName(fullName) {
 // ============================================================================
 
 if (require.main === module) {
-  const args = process.argv.slice(2);
-  
-  if (args.includes('--list')) {
-    listSuspiciousLeads(parseInt(args[args.indexOf('--list') + 1]) || 50);
-  } else if (args.includes('--rebuild')) {
-    rebuildPatternsFromVerifiedEmails();
-  } else {
-    analyzeAndFix()
-      .then(() => process.exit(0))
-      .catch(() => process.exit(1));
-  }
+  fixCompanyPatterns()
+    .then(() => process.exit(0))
+    .catch(() => process.exit(1));
 }
 
-module.exports = { analyzeAndFix, listSuspiciousLeads, rebuildPatternsFromVerifiedEmails };
+module.exports = { fixCompanyPatterns };
