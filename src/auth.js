@@ -55,48 +55,109 @@ const PRO_PLAN_FEATURES = {
 // HELPER: Link existing leads to new user
 // ============================================================================
 
-async function linkExistingLeadsToUser(userId, userEmail, leadsCollection) {
+async function linkExistingLeadsToUser(userId, userEmail, userName, leadsCollection) {
   const normalizedEmail = userEmail.toLowerCase().trim();
+  const normalizedName = (userName || '').toLowerCase().trim();
+  const userIdStr = userId.toString();
+  
+  let totalLinked = 0;
   
   try {
-    const result = await leadsCollection.updateMany(
+    // ================================================================
+    // STEP 1: Link by email (visitorEmail or userEmail)
+    // This has highest priority - most reliable match
+    // ================================================================
+    const emailResult = await leadsCollection.updateMany(
       {
-        // Find leads where visitorEmail or userEmail matches
-        // AND userId doesn't exist or is null/empty
-        $and: [
-          {
-            $or: [
-              { visitorEmail: normalizedEmail },
-              { userEmail: normalizedEmail }
-            ]
-          },
-          {
-            $or: [
-              { userId: { $exists: false } },
-              { userId: null },
-              { userId: '' }
-            ]
-          }
+        $or: [
+          { visitorEmail: { $regex: new RegExp(`^${escapeRegex(normalizedEmail)}$`, 'i') } },
+          { userEmail: { $regex: new RegExp(`^${escapeRegex(normalizedEmail)}$`, 'i') } }
         ]
       },
       {
         $set: {
-          userId: userId.toString(),
+          userId: userIdStr,
           userEmail: normalizedEmail,
-          linkedAt: new Date()
+          linkedAt: new Date(),
+          linkedBy: 'email_match'
         }
       }
     );
 
-    if (result.modifiedCount > 0) {
-      console.log(`🔗 Linked ${result.modifiedCount} existing leads to new user: ${normalizedEmail}`);
+    if (emailResult.modifiedCount > 0) {
+      console.log(`🔗 Linked ${emailResult.modifiedCount} leads by email: ${normalizedEmail}`);
+      totalLinked += emailResult.modifiedCount;
     }
 
-    return { success: true, linkedCount: result.modifiedCount };
+    // ================================================================
+    // STEP 2: Link by sourcedBy (case-insensitive name match)
+    // Only for leads that don't already have a userId
+    // ================================================================
+    if (normalizedName && normalizedName.length >= 2) {
+      const sourcedByResult = await leadsCollection.updateMany(
+        {
+          // Match sourcedBy case-insensitively
+          sourcedBy: { $regex: new RegExp(`^${escapeRegex(normalizedName)}$`, 'i') },
+          // Only link leads that don't already have a userId
+          $or: [
+            { userId: { $exists: false } },
+            { userId: null },
+            { userId: '' }
+          ]
+        },
+        {
+          $set: {
+            userId: userIdStr,
+            userEmail: normalizedEmail,
+            linkedAt: new Date(),
+            linkedBy: 'sourcedBy_match'
+          }
+        }
+      );
+
+      if (sourcedByResult.modifiedCount > 0) {
+        console.log(`🔗 Linked ${sourcedByResult.modifiedCount} leads by sourcedBy: ${userName}`);
+        totalLinked += sourcedByResult.modifiedCount;
+      }
+    }
+
+    // ================================================================
+    // STEP 3: Also update any leads that have OLD userId but matching email
+    // This handles the case where user deletes account and signs up again
+    // ================================================================
+    const reAssignResult = await leadsCollection.updateMany(
+      {
+        $or: [
+          { visitorEmail: { $regex: new RegExp(`^${escapeRegex(normalizedEmail)}$`, 'i') } },
+          { userEmail: { $regex: new RegExp(`^${escapeRegex(normalizedEmail)}$`, 'i') } }
+        ],
+        userId: { $exists: true, $ne: userIdStr }  // Has a DIFFERENT userId
+      },
+      {
+        $set: {
+          userId: userIdStr,
+          userEmail: normalizedEmail,
+          linkedAt: new Date(),
+          linkedBy: 'email_reassign'
+        }
+      }
+    );
+
+    if (reAssignResult.modifiedCount > 0) {
+      console.log(`🔗 Re-assigned ${reAssignResult.modifiedCount} leads with old userId to new user: ${normalizedEmail}`);
+      totalLinked += reAssignResult.modifiedCount;
+    }
+
+    return { success: true, linkedCount: totalLinked };
   } catch (error) {
     console.error('Failed to link leads:', error);
     return { success: false, linkedCount: 0, error: error.message };
   }
+}
+
+// Helper to escape special regex characters
+function escapeRegex(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // ============================================================================
@@ -356,8 +417,8 @@ function setupAuthRoutes(app, db) {
       // 🔗 AUTO-LINK EXISTING LEADS TO NEW USER
       // ================================================================
       // When a user signs up, automatically find and link any leads
-      // that were created with their email (before they had an account)
-      const linkResult = await linkExistingLeadsToUser(userId, normalizedEmail, leads);
+      // that were created with their email OR sourcedBy their name
+      const linkResult = await linkExistingLeadsToUser(userId, normalizedEmail, newUser.name, leads);
       // ================================================================
 
       // Generate token
@@ -533,7 +594,7 @@ function setupAuthRoutes(app, db) {
       // ================================================================
       let linkedLeadsCount = 0;
       if (isNewUser) {
-        const linkResult = await linkExistingLeadsToUser(user._id.toString(), normalizedEmail, leads);
+        const linkResult = await linkExistingLeadsToUser(user._id.toString(), normalizedEmail, user.name, leads);
         linkedLeadsCount = linkResult.linkedCount;
         if (linkedLeadsCount > 0) {
           console.log(`🔗 Linked ${linkedLeadsCount} existing leads to new Google user: ${normalizedEmail}`);
