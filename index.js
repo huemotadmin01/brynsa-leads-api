@@ -32,6 +32,8 @@ const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = [
       'https://huemotadmin01.github.io',  // Portal
+      'https://www.linkedin.com',          // Content scripts run on LinkedIn
+      'https://linkedin.com',              // Content scripts (non-www)
       'http://localhost:5173',             // Local development
       'http://localhost:3000'              // Local development
     ];
