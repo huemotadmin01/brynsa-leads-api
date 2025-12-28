@@ -21,7 +21,13 @@ const bcrypt = require('bcryptjs');
 // CONFIGURATION
 // ============================================================================
 
-const JWT_SECRET = process.env.JWT_SECRET || 'brynsa-dev-secret-change-in-production';
+// SECURITY: JWT_SECRET is required - no fallback to prevent accidental use of weak secret
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error('❌ FATAL: JWT_SECRET environment variable is required');
+  console.error('   Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
+  process.exit(1);
+}
 const JWT_EXPIRY = '30d';
 const OTP_EXPIRY_MINUTES = 10;
 
@@ -497,6 +503,7 @@ function setupAuthRoutes(app, db) {
   // ========================================================================
   // POST /api/auth/google - Google OAuth login/signup (FOR PORTAL ONLY)
   // UPDATED: Now automatically links existing leads for new Google users
+  // SECURITY: Now properly verifies Google tokens server-side
   // ========================================================================
   app.post('/api/auth/google', async (req, res) => {
     try {
@@ -506,10 +513,11 @@ function setupAuthRoutes(app, db) {
         return res.status(400).json({ success: false, error: 'Google credential is required' });
       }
 
-      const decoded = decodeGoogleToken(credential);
+      // SECURITY: Verify the Google token server-side instead of just decoding
+      const decoded = await verifyGoogleToken(credential);
 
       if (!decoded || !decoded.email) {
-        return res.status(401).json({ success: false, error: 'Invalid Google credential' });
+        return res.status(401).json({ success: false, error: 'Invalid or expired Google credential' });
       }
 
       const normalizedEmail = decoded.email.toLowerCase();
@@ -544,7 +552,7 @@ function setupAuthRoutes(app, db) {
             { _id: existingUser._id },
             { 
               $set: { 
-                googleId: decoded.sub,
+                googleId: decoded.googleId,
                 picture: decoded.picture || existingUser.picture,
                 name: existingUser.name || decoded.name,
                 lastLogin: new Date()
@@ -565,7 +573,7 @@ function setupAuthRoutes(app, db) {
           email: normalizedEmail,
           name: decoded.name || normalizedEmail.split('@')[0],
           picture: decoded.picture || null,
-          googleId: decoded.sub,
+          googleId: decoded.googleId,
           password: null, // Google users don't have password initially
           plan: 'free',
           features: FREE_PLAN_FEATURES,
@@ -1162,7 +1170,50 @@ function verifyToken(token) {
   }
 }
 
+// SECURITY: Verify Google OAuth token properly using Google's tokeninfo endpoint
+// This validates the token signature and ensures it wasn't forged
+async function verifyGoogleToken(token) {
+  try {
+    // Use Google's tokeninfo endpoint to verify the token
+    const response = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${token}`);
+    
+    if (!response.ok) {
+      console.error('Google token verification failed:', response.status);
+      return null;
+    }
+    
+    const payload = await response.json();
+    
+    // Verify the token was issued for our app (if GOOGLE_CLIENT_ID is set)
+    const expectedClientId = process.env.GOOGLE_CLIENT_ID;
+    if (expectedClientId && payload.aud !== expectedClientId) {
+      console.error('Google token audience mismatch');
+      return null;
+    }
+    
+    // Verify token is not expired
+    const now = Math.floor(Date.now() / 1000);
+    if (payload.exp && payload.exp < now) {
+      console.error('Google token expired');
+      return null;
+    }
+    
+    return {
+      email: payload.email,
+      name: payload.name,
+      picture: payload.picture,
+      googleId: payload.sub,
+      emailVerified: payload.email_verified === 'true'
+    };
+  } catch (error) {
+    console.error('Google token verification error:', error);
+    return null;
+  }
+}
+
+// DEPRECATED: Keep for reference but don't use - tokens should be verified, not just decoded
 function decodeGoogleToken(token) {
+  console.warn('⚠️ decodeGoogleToken is deprecated - use verifyGoogleToken instead');
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;

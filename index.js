@@ -20,19 +20,55 @@ const { setupVerificationRoutes } = require('./verifyEmails');
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const { MongoClient } = require('mongodb');
 const { setupListsRoutes } = require('./src/lists');
 const { setupPortalLeadsRoutes } = require('./src/portal-leads');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// SECURITY: CORS whitelist - only allow requests from trusted origins
+const corsOptions = {
+  origin: function (origin, callback) {
+    const allowedOrigins = [
+      'https://huemotadmin01.github.io',  // Portal
+      'http://localhost:5173',             // Local development
+      'http://localhost:3000'              // Local development
+    ];
+    
+    // Allow requests with no origin (like mobile apps, curl, or extensions)
+    if (!origin) return callback(null, true);
+    
+    // Allow chrome-extension:// origins
+    if (origin.startsWith('chrome-extension://')) {
+      return callback(null, true);
+    }
+    
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    console.warn('⚠️ CORS blocked request from:', origin);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true
+};
+app.use(cors(corsOptions));
+
+// SECURITY: Limit request body size to prevent memory exhaustion
+app.use(express.json({ limit: '10mb' }));
+
+// SECURITY: Add security headers
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },  // Allow extension to load resources
+  contentSecurityPolicy: false  // Disable CSP for API (not serving HTML)
+}));
 
 // ============================================================================
 // ENVIRONMENT VALIDATION
 // ============================================================================
-const requiredEnvVars = ['MONGO_URL', 'OPENAI_API_KEY', 'EXPORT_SECRET'];
-const optionalEnvVars = ['REBUILD_SECRET', 'ODOO_ENDPOINT', 'ODOO_USERNAME', 'ODOO_PASSWORD', 'ODOO_DATABASE'];
+const requiredEnvVars = ['MONGO_URL', 'OPENAI_API_KEY', 'EXPORT_SECRET', 'JWT_SECRET'];
+const optionalEnvVars = ['REBUILD_SECRET', 'ODOO_ENDPOINT', 'ODOO_USERNAME', 'ODOO_PASSWORD', 'ODOO_DATABASE', 'RESEND_API_KEY', 'GOOGLE_CLIENT_ID'];
 
 console.log('🔒 Environment Check:');
 for (const envVar of requiredEnvVars) {
