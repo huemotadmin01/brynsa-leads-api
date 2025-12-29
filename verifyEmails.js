@@ -80,6 +80,7 @@ async function verifyEmails() {
     // Group by domain for efficient processing
     const byDomain = {};
     for (const lead of toVerify) {
+      if (!lead.email || typeof lead.email !== 'string') continue;
       const domain = lead.email.split("@")[1]?.toLowerCase();
       if (!domain) continue;
       
