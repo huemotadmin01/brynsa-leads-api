@@ -2,6 +2,7 @@
  * Brynsa LinkedIn Outreach Assistant - Backend API
  * 
  * SECURITY UPDATE: All credentials now server-side only
+ * VALIDATION UPDATE: Added lead validation for name and companyName
  * 
  * Environment Variables Required:
  * - MONGO_URL: MongoDB connection string
@@ -17,6 +18,7 @@
 const { setupAuthRoutes } = require('./src/auth');
 const { setupEmailSystem, learnFromLead } = require('./emailSystem');
 const { setupVerificationRoutes } = require('./verifyEmails');
+const { validateLead, validateName, validateCompanyName } = require('./src/validation');
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -188,7 +190,7 @@ async function startServer() {
     setupVerificationRoutes(app, db);
     setupAuthRoutes(app, db);
     setupListsRoutes(app, db);
-setupPortalLeadsRoutes(app, db);
+    setupPortalLeadsRoutes(app, db);
     const leads = db.collection('leads');
     const exportLogs = db.collection('export_logs');
 
@@ -428,13 +430,33 @@ setupPortalLeadsRoutes(app, db);
       }
     });
 
+    // ========================================================================
+    // POST /api/leads - Save lead with VALIDATION
+    // ========================================================================
     app.post('/api/leads', async (req, res) => {
       try {
         const lead = req.body;
 
-        if (!lead.name || !lead.email) {
-          return res.status(400).json({ success: false, message: 'Missing required fields' });
+        // ================================================================
+        // VALIDATION: Name and CompanyName required, Name cannot have digits
+        // ================================================================
+        const validation = validateLead(lead, { requireCompany: true });
+        
+        if (!validation.valid) {
+          console.log(`❌ Lead validation failed: ${validation.errors.join(', ')}`);
+          return res.status(400).json({ 
+            success: false, 
+            message: 'Validation failed',
+            errors: validation.errors,
+            validationError: true
+          });
         }
+
+        // Additional check: email is still required for backward compatibility
+        if (!lead.email) {
+          return res.status(400).json({ success: false, message: 'Missing required field: email' });
+        }
+        // ================================================================
 
         const existing = await leads.findOne({ linkedinUrl: lead.linkedinUrl });
         if (existing) {
@@ -443,14 +465,17 @@ setupPortalLeadsRoutes(app, db);
 
         await leads.insertOne(lead);
         await learnFromLead(db, lead);
+        
+        console.log(`✅ Lead saved: ${lead.name} @ ${lead.companyName}`);
         res.status(200).json({ success: true, message: 'Lead saved to MongoDB!' });
       } catch (err) {
+        console.error('❌ Lead save error:', err);
         res.status(500).json({ success: false, message: 'Failed to save lead.' });
       }
     });
 
     // ========================================================================
-    // ODOO CRM EXPORT - SECURE VERSION
+    // ODOO CRM EXPORT - SECURE VERSION WITH VALIDATION
     // ========================================================================
 
     async function rollbackCreatedRecords(callOdoo, createdRecords) {
@@ -497,7 +522,7 @@ setupPortalLeadsRoutes(app, db);
       return rollbackResults;
     }
 
-    // SECURE ODOO EXPORT - No client credentials
+    // SECURE ODOO EXPORT - No client credentials, WITH VALIDATION
     app.post('/api/crm/export-odoo', async (req, res) => {
       try {
         // SECURITY: Do NOT accept crmConfig from client
@@ -517,6 +542,18 @@ setupPortalLeadsRoutes(app, db);
           return res.status(400).json({ error: 'Valid profileType required' });
         }
 
+        // ================================================================
+        // VALIDATION: Name and CompanyName for CRM export
+        // ================================================================
+        const nameValidation = validateName(leadData.name);
+        if (!nameValidation.valid) {
+          return res.status(400).json({ 
+            success: false, 
+            error: nameValidation.error,
+            validationError: true 
+          });
+        }
+
         const cleanName = sanitizeForOdoo(leadData.name);
         if (cleanName.length < 2) {
           return res.status(400).json({ error: 'Invalid name' });
@@ -528,14 +565,21 @@ setupPortalLeadsRoutes(app, db);
           if (match) cleanCompany = sanitizeForOdoo(match[1].split('\n')[0]);
         }
 
+        // Validate company name
+        const companyValidation = validateCompanyName(cleanCompany);
+        if (!companyValidation.valid) {
+          return res.status(400).json({ 
+            success: false, 
+            error: companyValidation.error,
+            validationError: true 
+          });
+        }
+        // ================================================================
+
         let sourcedBy = sanitizeForOdoo(leadData.sourcedBy || '');
         if (!sourcedBy && leadData.comment) {
           const match = leadData.comment.match(/Sourced by:\s*(.+)/);
           if (match) sourcedBy = sanitizeForOdoo(match[1].split('\n')[0]);
-        }
-
-        if (!cleanCompany || cleanCompany.length < 2) {
-          return res.status(400).json({ error: 'Invalid company name' });
         }
 
         const isCandidate = profileType.toLowerCase() === 'candidate';
@@ -915,11 +959,12 @@ setupPortalLeadsRoutes(app, db);
       res.json({ 
         status: 'ok', 
         timestamp: new Date().toISOString(),
-        version: '2.0.0-secure',
+        version: '2.1.0-validated',
         features: {
           openaiProxy: !!process.env.OPENAI_API_KEY,
           odooIntegration: validateOdooConfig(),
-          emailEnrichment: true
+          emailEnrichment: true,
+          leadValidation: true
         }
       });
     });
@@ -938,6 +983,7 @@ setupPortalLeadsRoutes(app, db);
       console.log(`   ODOO_DATABASE: ${process.env.ODOO_DATABASE ? '✅' : '❌'}`);
       console.log('');
       console.log('🔐 Security: All credentials are server-side only');
+      console.log('✅ Validation: Name (no digits) and CompanyName required');
     });
 
   } catch (err) {

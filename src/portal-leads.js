@@ -1,5 +1,5 @@
 /**
- * Portal Leads Routes - FIXED with Consistent userId
+ * Portal Leads Routes - FIXED with Consistent userId AND VALIDATION
  * File: src/portal-leads.js
  * 
  * FIXES:
@@ -7,6 +7,11 @@
  * 2. Checks duplicates using BOTH userId and visitorId for backward compat
  * 3. Uses consistent field names (companyName, not company)
  * 4. Properly stores all lead data
+ * 
+ * VALIDATION UPDATE:
+ * - Name cannot be blank
+ * - Name cannot contain digits
+ * - CompanyName cannot be blank
  */
 
 const { ObjectId } = require('mongodb');
@@ -17,10 +22,11 @@ function setupPortalLeadsRoutes(app, db) {
   const usersCollection = db.collection('portal_users');
 
   const { authMiddleware, optionalAuthMiddleware } = require('./auth');
+  const { validateLead, validateName, validateCompanyName } = require('./validation');
   const auth = authMiddleware(usersCollection);
   const optionalAuth = optionalAuthMiddleware(usersCollection);
 
-  console.log('👥 Setting up Portal Leads routes (FIXED)...');
+  console.log('👥 Setting up Portal Leads routes (FIXED + VALIDATED)...');
 
   // ==================== GET ALL LEADS ====================
   app.get('/api/portal/leads', auth, async (req, res) => {
@@ -75,7 +81,7 @@ function setupPortalLeadsRoutes(app, db) {
     }
   });
 
-  // ==================== SAVE LEAD ====================
+  // ==================== SAVE LEAD (WITH VALIDATION) ====================
   app.post('/api/portal/leads/save', optionalAuth, async (req, res) => {
     try {
       const { 
@@ -96,9 +102,35 @@ function setupPortalLeadsRoutes(app, db) {
         lists 
       } = req.body;
 
-      if (!name) {
-        return res.status(400).json({ success: false, error: 'Name is required' });
+      // ================================================================
+      // VALIDATION: Name and CompanyName required, Name cannot have digits
+      // ================================================================
+      const finalCompanyName = companyName || company;
+      
+      // Validate name
+      const nameValidation = validateName(name);
+      if (!nameValidation.valid) {
+        console.log(`❌ Portal lead validation failed (name): ${nameValidation.error}`);
+        return res.status(400).json({ 
+          success: false, 
+          error: nameValidation.error,
+          validationError: true,
+          field: 'name'
+        });
       }
+
+      // Validate company name
+      const companyValidation = validateCompanyName(finalCompanyName);
+      if (!companyValidation.valid) {
+        console.log(`❌ Portal lead validation failed (company): ${companyValidation.error}`);
+        return res.status(400).json({ 
+          success: false, 
+          error: companyValidation.error,
+          validationError: true,
+          field: 'companyName'
+        });
+      }
+      // ================================================================
 
       const userId = req.user?._id?.toString() || null;
       const userEmail = req.user?.email || null;
@@ -156,8 +188,8 @@ function setupPortalLeadsRoutes(app, db) {
         }
       }
 
-      // Determine company name (handle both field names)
-      const finalCompanyName = sanitizeString(companyName || company, 200) || null;
+      // Sanitize company name
+      const sanitizedCompanyName = sanitizeString(finalCompanyName, 200);
       
       // Determine sourcedBy (from request or user name)
       const finalSourcedBy = sanitizeString(sourcedBy, 200) || userName || null;
@@ -177,8 +209,8 @@ function setupPortalLeadsRoutes(app, db) {
         email: sanitizeString(email, 200) || null,
         
         // Company - store in BOTH fields for compatibility
-        companyName: finalCompanyName,
-        company: finalCompanyName,
+        companyName: sanitizedCompanyName,
+        company: sanitizedCompanyName,
         
         // Title/headline
         headline: sanitizeString(headline || title, 500) || null,
@@ -227,7 +259,7 @@ function setupPortalLeadsRoutes(app, db) {
         { $inc: { 'usage.leadsScraped': 1 } }
       );
 
-      console.log(`✅ Lead saved: ${name} by ${userEmail} (userId: ${userId})`);
+      console.log(`✅ Lead saved: ${name} @ ${sanitizedCompanyName} by ${userEmail}`);
       res.json({ success: true, lead: { ...newLead, _id: result.insertedId } });
       
     } catch (error) {
@@ -377,7 +409,8 @@ function setupPortalLeadsRoutes(app, db) {
   leadsCollection.createIndex({ visitorId: 1, linkedinUrl: 1 }).catch(() => {});
   leadsCollection.createIndex({ userId: 1, lists: 1 }).catch(() => {});
 
-  console.log('✅ Portal Leads routes registered (FIXED with consistent userId)');
+  console.log('✅ Portal Leads routes registered (FIXED with validation)');
+  console.log('   Validation: Name (no digits) and CompanyName required');
 }
 
 function sanitizeString(str, maxLength = 500) {
