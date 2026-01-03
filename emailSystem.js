@@ -1,5 +1,5 @@
 // ============================================================================
-// emailSystem.js - COMPLETE EMAIL SYSTEM (Single File)
+// emailSystem.js - COMPLETE EMAIL SYSTEM (Single File) + VERIFICATION STATUS
 // ============================================================================
 // 
 // This file contains:
@@ -7,6 +7,7 @@
 // 2. Email Verification (MX/SMTP)
 // 3. Confidence Calculation
 // 4. All routes
+// 5. NEW: Verification Status endpoint for extension
 //
 // INSTALLATION:
 // 1. Copy this file to your backend folder
@@ -112,6 +113,55 @@ function setupEmailSystem(app, db) {
   });
 
   // ========================================================================
+  // GET /api/email/verification-status - Check if email has been verified
+  // NEW: Used by extension to get real-time verification status
+  // ========================================================================
+  app.get("/api/email/verification-status", async (req, res) => {
+    try {
+      const { email } = req.query;
+
+      if (!email) {
+        return res.status(400).json({
+          success: false,
+          error: "Email parameter is required"
+        });
+      }
+
+      const normalizedEmail = email.toLowerCase().trim();
+
+      // Look up the email in leads collection
+      const lead = await leads.findOne({
+        email: { $regex: new RegExp(`^${normalizedEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      });
+
+      if (!lead) {
+        return res.json({
+          success: true,
+          found: false,
+          verified: undefined, // undefined = not checked yet
+          message: "Email not found in database"
+        });
+      }
+
+      // Return verification status
+      return res.json({
+        success: true,
+        found: true,
+        verified: lead.emailVerified,  // true = valid, false = invalid, undefined = not checked
+        checkedAt: lead.emailVerifiedAt || null,
+        method: lead.emailVerificationMethod || null,
+        confidence: lead.emailVerificationConfidence || null,
+        reason: lead.emailVerificationReason || null,
+        source: lead.emailEnriched ? 'enriched' : 'scraped'
+      });
+
+    } catch (error) {
+      console.error("Email verification status error:", error);
+      return res.status(500).json({ success: false, error: "Internal error" });
+    }
+  });
+
+  // ========================================================================
   // POST /api/email/rebuild-cache - Rebuild patterns from existing data
   // ========================================================================
   app.post("/api/email/rebuild-cache", async (req, res) => {
@@ -158,7 +208,7 @@ function setupEmailSystem(app, db) {
     }
   });
 
-  console.log("✅ Email System routes registered: /api/email/instant, /api/email/pattern/:company, /api/email/rebuild-cache, /api/email/stats");
+  console.log("✅ Email System routes registered: /api/email/instant, /api/email/pattern/:company, /api/email/rebuild-cache, /api/email/stats, /api/email/verification-status");
 }
 
 // ============================================================================
