@@ -7,7 +7,8 @@
 // 2. Email Verification (MX/SMTP)
 // 3. Confidence Calculation
 // 4. All routes
-// 5. NEW: Verification Status endpoint for extension
+// 5. Verification Status endpoint for extension
+// 6. NEW: Placeholder company blocklist to prevent bad pattern learning
 //
 // INSTALLATION:
 // 1. Copy this file to your backend folder
@@ -50,6 +51,130 @@ const PUBLIC_DOMAINS = new Set([
 ]);
 
 // ============================================================================
+// PLACEHOLDER COMPANY BLOCKLIST
+// These company names should NOT trigger email generation or pattern learning
+// ============================================================================
+const PLACEHOLDER_COMPANIES = new Set([
+  // Confidential/Private
+  "confidential",
+  "private",
+  "undisclosed",
+  "not disclosed",
+  "withheld",
+  "hidden",
+  
+  // Self-employed variations
+  "self-employed",
+  "self employed",
+  "selfemployed",
+  "self",
+  
+  // Freelance variations
+  "freelance",
+  "freelancer",
+  "freelancing",
+  "free lance",
+  "free-lance",
+  
+  // Independent
+  "independent",
+  "independent consultant",
+  "independent contractor",
+  "contractor",
+  
+  // Consultant
+  "consultant",
+  "consulting",
+  
+  // Generic placeholders
+  "n/a",
+  "na",
+  "none",
+  "null",
+  "undefined",
+  "unknown",
+  "not available",
+  "not applicable",
+  "-",
+  "--",
+  "---",
+  ".",
+  "..",
+  "...",
+  
+  // Multiple/Various
+  "various",
+  "multiple",
+  "several",
+  "different",
+  
+  // Student/Education
+  "student",
+  "university",
+  "college",
+  "school",
+  
+  // Unemployed/Seeking
+  "unemployed",
+  "seeking opportunities",
+  "looking for opportunities",
+  "open to work",
+  "available",
+  
+  // Personal
+  "personal",
+  "myself",
+  "me",
+  "my company",
+  "own business",
+  
+  // Test/Demo
+  "test",
+  "demo",
+  "sample",
+  "example"
+]);
+
+/**
+ * Check if a company name is a placeholder that should be blocked
+ * @param {string} companyName - The company name to check
+ * @returns {boolean} - True if it's a placeholder company
+ */
+function isPlaceholderCompany(companyName) {
+  if (!companyName) return true;
+  
+  const normalized = String(companyName)
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s\-\/]/g, ""); // Keep spaces, hyphens, slashes
+  
+  // Check exact match
+  if (PLACEHOLDER_COMPANIES.has(normalized)) {
+    return true;
+  }
+  
+  // Check if normalized (no spaces) version matches
+  const noSpaces = normalized.replace(/[\s\-\/]/g, "");
+  if (PLACEHOLDER_COMPANIES.has(noSpaces)) {
+    return true;
+  }
+  
+  // Check for partial matches (company name starts with placeholder)
+  for (const placeholder of PLACEHOLDER_COMPANIES) {
+    if (normalized === placeholder || noSpaces === placeholder.replace(/[\s\-\/]/g, "")) {
+      return true;
+    }
+  }
+  
+  // Check for very short company names (likely invalid)
+  if (normalized.length < 2) {
+    return true;
+  }
+  
+  return false;
+}
+
+// ============================================================================
 // SETUP ALL ROUTES
 // ============================================================================
 
@@ -78,6 +203,21 @@ function setupEmailSystem(app, db) {
         });
       }
 
+      // ================================================================
+      // BLOCK PLACEHOLDER COMPANIES
+      // ================================================================
+      if (isPlaceholderCompany(companyName)) {
+        console.log(`⏩ Skipping email generation for placeholder company: "${companyName}"`);
+        return res.json({
+          success: false,
+          email: null,
+          source: "placeholder_company",
+          message: `Company "${companyName}" is a placeholder - cannot generate email`,
+          timing: 0
+        });
+      }
+      // ================================================================
+
       const result = await generateInstantEmail(db, name, companyName);
       return res.json(result);
 
@@ -93,6 +233,15 @@ function setupEmailSystem(app, db) {
   app.get("/api/email/pattern/:company", async (req, res) => {
     try {
       const companyName = decodeURIComponent(req.params.company);
+      
+      // Block placeholder companies
+      if (isPlaceholderCompany(companyName)) {
+        return res.json({ 
+          success: false, 
+          error: "Placeholder company - no pattern available" 
+        });
+      }
+      
       const pattern = await getCompanyPattern(db, companyName);
 
       if (pattern) {
@@ -208,7 +357,78 @@ function setupEmailSystem(app, db) {
     }
   });
 
-  console.log("✅ Email System routes registered: /api/email/instant, /api/email/pattern/:company, /api/email/rebuild-cache, /api/email/stats, /api/email/verification-status");
+  // ========================================================================
+  // DELETE /api/email/pattern/:company - Delete a bad pattern (admin)
+  // ========================================================================
+  app.delete("/api/email/pattern/:company", async (req, res) => {
+    try {
+      const { secret } = req.query;
+      
+      if (secret !== process.env.REBUILD_SECRET) {
+        return res.status(401).json({ success: false, error: "Invalid secret" });
+      }
+      
+      const companyName = decodeURIComponent(req.params.company);
+      const result = await patterns.deleteOne({ companyName });
+      
+      if (result.deletedCount > 0) {
+        console.log(`🗑️ Deleted pattern for: ${companyName}`);
+        return res.json({ success: true, message: `Pattern deleted for ${companyName}` });
+      }
+      
+      return res.json({ success: false, error: "Pattern not found" });
+
+    } catch (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // ========================================================================
+  // POST /api/email/cleanup-placeholders - Remove all placeholder patterns
+  // ========================================================================
+  app.post("/api/email/cleanup-placeholders", async (req, res) => {
+    try {
+      const { secret } = req.body;
+      
+      if (secret !== process.env.REBUILD_SECRET) {
+        return res.status(401).json({ success: false, error: "Invalid secret" });
+      }
+
+      // Find and delete all placeholder company patterns
+      const allPatterns = await patterns.find({}).toArray();
+      let deleted = 0;
+      const deletedCompanies = [];
+
+      for (const pattern of allPatterns) {
+        if (isPlaceholderCompany(pattern.companyName)) {
+          await patterns.deleteOne({ _id: pattern._id });
+          deleted++;
+          deletedCompanies.push(pattern.companyName);
+          console.log(`🗑️ Deleted placeholder pattern: ${pattern.companyName}`);
+        }
+      }
+
+      return res.json({
+        success: true,
+        deleted,
+        companies: deletedCompanies,
+        message: `Cleaned up ${deleted} placeholder patterns`
+      });
+
+    } catch (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  console.log("✅ Email System routes registered:");
+  console.log("   POST /api/email/instant");
+  console.log("   GET  /api/email/pattern/:company");
+  console.log("   GET  /api/email/verification-status");
+  console.log("   POST /api/email/rebuild-cache");
+  console.log("   GET  /api/email/stats");
+  console.log("   DELETE /api/email/pattern/:company (admin)");
+  console.log("   POST /api/email/cleanup-placeholders (admin)");
+  console.log("   🛡️ Placeholder company blocklist: ENABLED");
 }
 
 // ============================================================================
@@ -217,6 +437,17 @@ function setupEmailSystem(app, db) {
 
 async function generateInstantEmail(db, name, companyName) {
   const startTime = Date.now();
+
+  // Double-check placeholder (in case called directly, not via API)
+  if (isPlaceholderCompany(companyName)) {
+    return {
+      success: false,
+      email: null,
+      source: "placeholder_company",
+      message: `Company "${companyName}" is a placeholder`,
+      timing: Date.now() - startTime
+    };
+  }
 
   // 1. Check company_patterns cache
   let pattern = await getCompanyPattern(db, companyName);
@@ -265,6 +496,11 @@ async function generateInstantEmail(db, name, companyName) {
 }
 
 async function getCompanyPattern(db, companyName) {
+  // Block placeholder companies from pattern lookup
+  if (isPlaceholderCompany(companyName)) {
+    return null;
+  }
+
   const patterns = db.collection("company_patterns");
   
   // Try exact match
@@ -280,6 +516,11 @@ async function getCompanyPattern(db, companyName) {
 }
 
 async function getPatternFromAudit(db, companyName) {
+  // Block placeholder companies
+  if (isPlaceholderCompany(companyName)) {
+    return null;
+  }
+
   const audits = db.collection("enriched_audit");
 
   const result = await audits.aggregate([
@@ -314,6 +555,15 @@ async function getPatternFromAudit(db, companyName) {
 }
 
 async function findPeerPattern(db, companyName) {
+  // ================================================================
+  // BLOCK PLACEHOLDER COMPANIES FROM PEER PATTERN LEARNING
+  // ================================================================
+  if (isPlaceholderCompany(companyName)) {
+    console.log(`⏩ Skipping peer pattern discovery for placeholder: "${companyName}"`);
+    return null;
+  }
+  // ================================================================
+
   const leads = db.collection("leads");
 
   const peers = await leads.find({
@@ -342,8 +592,10 @@ async function findPeerPattern(db, companyName) {
   if (sorted.length > 0) {
     const best = sorted[0];
     
-    // Cache for future
-    await cacheCompanyPattern(db, companyName, best);
+    // Cache for future (only if not a placeholder company)
+    if (!isPlaceholderCompany(companyName)) {
+      await cacheCompanyPattern(db, companyName, best);
+    }
 
     return {
       pattern: best.pattern,
@@ -421,6 +673,15 @@ function applyPatternToName(pattern, fullName, domain) {
 // ============================================================================
 
 async function cacheCompanyPattern(db, companyName, patternData) {
+  // ================================================================
+  // BLOCK PLACEHOLDER COMPANIES FROM BEING CACHED
+  // ================================================================
+  if (isPlaceholderCompany(companyName)) {
+    console.log(`⏩ NOT caching pattern for placeholder company: "${companyName}"`);
+    return;
+  }
+  // ================================================================
+
   const patterns = db.collection("company_patterns");
   
   try {
@@ -452,7 +713,21 @@ async function rebuildPatternCache(db) {
 
   console.log("🔄 Rebuilding pattern cache...");
 
-  // From enriched_audit
+  // First, clean up any existing placeholder patterns
+  const allPatterns = await patterns.find({}).toArray();
+  let cleanedUp = 0;
+  for (const pattern of allPatterns) {
+    if (isPlaceholderCompany(pattern.companyName)) {
+      await patterns.deleteOne({ _id: pattern._id });
+      cleanedUp++;
+      console.log(`🗑️ Cleaned up placeholder pattern: ${pattern.companyName}`);
+    }
+  }
+  if (cleanedUp > 0) {
+    console.log(`✅ Cleaned up ${cleanedUp} placeholder patterns`);
+  }
+
+  // From enriched_audit (skip placeholders)
   const auditPatterns = await audits.aggregate([
     {
       $match: {
@@ -474,6 +749,12 @@ async function rebuildPatternCache(db) {
   let cached = 0;
 
   for (const ap of auditPatterns) {
+    // Skip placeholder companies
+    if (isPlaceholderCompany(ap._id)) {
+      console.log(`⏩ Skipping placeholder from audit: ${ap._id}`);
+      continue;
+    }
+
     await patterns.updateOne(
       { companyName: ap._id },
       {
@@ -494,7 +775,7 @@ async function rebuildPatternCache(db) {
     cached++;
   }
 
-  // From original leads (not enriched)
+  // From original leads (not enriched, skip placeholders)
   const leadPatterns = await leads.aggregate([
     {
       $match: {
@@ -514,6 +795,12 @@ async function rebuildPatternCache(db) {
   let fromLeads = 0;
 
   for (const lp of leadPatterns) {
+    // Skip placeholder companies
+    if (isPlaceholderCompany(lp._id)) {
+      console.log(`⏩ Skipping placeholder from leads: ${lp._id}`);
+      continue;
+    }
+
     const existing = await patterns.findOne({ companyName: lp._id });
     if (existing) continue;
 
@@ -544,11 +831,15 @@ async function rebuildPatternCache(db) {
   }
 
   console.log(`✅ Cache rebuilt: ${cached} from audit, ${fromLeads} from leads`);
+  if (cleanedUp > 0) {
+    console.log(`🗑️ Cleaned up: ${cleanedUp} placeholder patterns`);
+  }
 
   return {
     success: true,
     fromAudit: cached,
     fromLeads: fromLeads,
+    cleanedUp: cleanedUp,
     total: cached + fromLeads
   };
 }
@@ -762,6 +1053,15 @@ function splitName(fullName) {
 async function learnFromLead(db, lead) {
   if (!lead.email || lead.email === "noemail@domain.com") return;
   
+  // ================================================================
+  // BLOCK PLACEHOLDER COMPANIES FROM LEARNING
+  // ================================================================
+  if (isPlaceholderCompany(lead.companyName)) {
+    console.log(`⏩ NOT learning from placeholder company: "${lead.companyName}"`);
+    return;
+  }
+  // ================================================================
+  
   const domain = lead.email.split("@")[1]?.toLowerCase();
   if (!domain || PUBLIC_DOMAINS.has(domain)) return;
 
@@ -787,6 +1087,8 @@ module.exports = {
   rebuildPatternCache,
   extractPatternFromEmail,
   cacheCompanyPattern,
+  isPlaceholderCompany,  // Export for use in other modules
+  PLACEHOLDER_COMPANIES, // Export the set for reference
   CONFIG
 };
 
