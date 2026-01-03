@@ -1,5 +1,5 @@
 /**
- * Portal Leads Routes - FIXED with Consistent userId AND VALIDATION
+ * Portal Leads Routes - FIXED with Consistent userId, VALIDATION, AND DUPLICATE UPDATES
  * File: src/portal-leads.js
  * 
  * FIXES:
@@ -7,6 +7,7 @@
  * 2. Checks duplicates using BOTH userId and visitorId for backward compat
  * 3. Uses consistent field names (companyName, not company)
  * 4. Properly stores all lead data
+ * 5. NEW: Updates lead data when duplicate is found (not just lists)
  * 
  * VALIDATION UPDATE:
  * - Name cannot be blank
@@ -26,7 +27,7 @@ function setupPortalLeadsRoutes(app, db) {
   const auth = authMiddleware(usersCollection);
   const optionalAuth = optionalAuthMiddleware(usersCollection);
 
-  console.log('👥 Setting up Portal Leads routes (FIXED + VALIDATED)...');
+  console.log('👥 Setting up Portal Leads routes (FIXED + VALIDATED + DUPLICATE UPDATES)...');
 
   // ==================== GET ALL LEADS ====================
   app.get('/api/portal/leads', auth, async (req, res) => {
@@ -81,7 +82,7 @@ function setupPortalLeadsRoutes(app, db) {
     }
   });
 
-  // ==================== SAVE LEAD (WITH VALIDATION) ====================
+  // ==================== SAVE LEAD (WITH VALIDATION AND DUPLICATE UPDATES) ====================
   app.post('/api/portal/leads/save', optionalAuth, async (req, res) => {
     try {
       const { 
@@ -99,7 +100,11 @@ function setupPortalLeadsRoutes(app, db) {
         currentTitle,
         sourcedBy,
         leadSource, 
-        lists 
+        lists,
+        // Email metadata (for smart update logic)
+        emailSource,
+        emailConfidence,
+        emailPattern
       } = req.body;
 
       // ================================================================
@@ -151,16 +156,81 @@ function setupPortalLeadsRoutes(app, db) {
         });
         
         if (existing) {
-          // Update lists if provided
+          // ================================================================
+          // UPDATE EXISTING LEAD DATA (not just lists!)
+          // ================================================================
+          const updateFields = {
+            updatedAt: new Date(),
+            lastScrapedAt: new Date()
+          };
+
+          // Update profile fields only if new values are provided and non-empty
+          if (name && name.trim()) {
+            updateFields.name = sanitizeString(name, 200);
+          }
+          
+          const sanitizedCompanyName = sanitizeString(finalCompanyName, 200);
+          if (sanitizedCompanyName) {
+            updateFields.companyName = sanitizedCompanyName;
+            updateFields.company = sanitizedCompanyName;
+          }
+          
+          if (currentTitle && currentTitle.trim()) {
+            updateFields.currentTitle = sanitizeString(currentTitle, 300);
+            updateFields.title = sanitizeString(currentTitle, 300);
+          } else if (title && title.trim()) {
+            updateFields.currentTitle = sanitizeString(title, 300);
+            updateFields.title = sanitizeString(title, 300);
+          }
+          
+          if (headline && headline.trim()) {
+            updateFields.headline = sanitizeString(headline, 500);
+          }
+          
+          if (location && location.trim()) {
+            updateFields.location = sanitizeString(location, 200);
+          }
+
+          // Smart email update logic:
+          // Only update email if:
+          // 1. New email is valid AND
+          // 2. Either no existing email OR new email has higher confidence AND existing not verified
+          const newEmailValid = email && email !== 'noemail@domain.com' && isValidEmail(email);
+          const existingEmailValid = existing.email && existing.email !== 'noemail@domain.com' && isValidEmail(existing.email);
+          const newEmailBetter = (emailConfidence || 0) > (existing.emailConfidence || 0);
+          const existingNotVerified = existing.emailVerified !== true;
+
+          if (newEmailValid && (!existingEmailValid || (newEmailBetter && existingNotVerified))) {
+            updateFields.email = sanitizeString(email, 200);
+            updateFields.emailSource = emailSource || 'scraped';
+            updateFields.emailConfidence = emailConfidence || 0;
+            updateFields.emailPattern = emailPattern || null;
+            
+            // Reset verification status if email changed
+            if (existing.email !== email) {
+              updateFields.emailVerified = null;
+              updateFields.emailVerifiedAt = null;
+              updateFields.emailVerificationMethod = null;
+              updateFields.emailVerificationConfidence = null;
+            }
+          }
+
+          // Build the update operation
+          const updateOp = { $set: updateFields };
+          
+          // Add to lists if provided (using $addToSet to avoid duplicates)
           if (lists && lists.length > 0) {
-            await leadsCollection.updateOne(
-              { _id: existing._id },
-              { 
-                $addToSet: { lists: { $each: lists } }, 
-                $set: { updatedAt: new Date() } 
-              }
-            );
-            // Ensure lists exist
+            updateOp.$addToSet = { lists: { $each: lists } };
+          }
+
+          // Perform the update
+          await leadsCollection.updateOne(
+            { _id: existing._id },
+            updateOp
+          );
+
+          // Ensure lists exist in portal_lists collection
+          if (lists && lists.length > 0) {
             for (const listName of lists) {
               await listsCollection.updateOne(
                 { userId, name: listName },
@@ -171,19 +241,16 @@ function setupPortalLeadsRoutes(app, db) {
                 { upsert: true }
               );
             }
-            return res.json({ 
-              success: true, 
-              duplicate: true, 
-              updated: true, 
-              leadId: existing._id,
-              message: 'Lead already exists - added to list'
-            });
           }
+
+          console.log(`✅ Lead updated: ${name} @ ${sanitizedCompanyName} (duplicate - data refreshed)`);
+          
           return res.json({ 
             success: true, 
             duplicate: true, 
-            lead: existing,
-            message: 'Lead already exists'
+            updated: true, 
+            leadId: existing._id,
+            message: 'Lead updated with latest data'
           });
         }
       }
@@ -224,6 +291,12 @@ function setupPortalLeadsRoutes(app, db) {
         profilePicture: sanitizeString(profilePicture, 500) || null,
         about: sanitizeString(about, 2000) || null,
         
+        // Email metadata
+        emailSource: emailSource || 'none',
+        emailConfidence: emailConfidence || 0,
+        emailPattern: emailPattern || null,
+        emailVerified: null,
+        
         // Sourcing
         sourcedBy: finalSourcedBy,
         leadSource: leadSource || 'extension',
@@ -234,7 +307,8 @@ function setupPortalLeadsRoutes(app, db) {
         // Timestamps
         createdAt: new Date(),
         updatedAt: new Date(),
-        savedAt: new Date()
+        savedAt: new Date(),
+        lastScrapedAt: new Date()
       };
 
       const result = await leadsCollection.insertOne(newLead);
@@ -409,8 +483,9 @@ function setupPortalLeadsRoutes(app, db) {
   leadsCollection.createIndex({ visitorId: 1, linkedinUrl: 1 }).catch(() => {});
   leadsCollection.createIndex({ userId: 1, lists: 1 }).catch(() => {});
 
-  console.log('✅ Portal Leads routes registered (FIXED with validation)');
+  console.log('✅ Portal Leads routes registered (FIXED with validation + duplicate updates)');
   console.log('   Validation: Name (no digits) and CompanyName required');
+  console.log('   Duplicate handling: Now updates lead data on re-scrape');
 }
 
 function sanitizeString(str, maxLength = 500) {
@@ -420,6 +495,10 @@ function sanitizeString(str, maxLength = 500) {
     .replace(/['"\\]/g, '')
     .trim()
     .substring(0, maxLength);
+}
+
+function isValidEmail(e) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i.test(e || '');
 }
 
 module.exports = { setupPortalLeadsRoutes };
