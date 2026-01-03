@@ -3,6 +3,7 @@
  * 
  * SECURITY UPDATE: All credentials now server-side only
  * VALIDATION UPDATE: Added lead validation for name and companyName
+ * UPDATE v2.2.0: Leads are now UPDATED when re-scraped instead of skipped
  * 
  * Environment Variables Required:
  * - MONGO_URL: MongoDB connection string
@@ -120,6 +121,27 @@ function isValidEmail(e) {
 }
 
 // ============================================================================
+// URL NORMALIZATION
+// ============================================================================
+
+function normalizeLinkedInUrl(url) {
+  if (!url) return null;
+  try {
+    // Remove query params and trailing slashes, normalize to www
+    let normalized = url.replace(/\?.*$/, '').replace(/\/+$/, '');
+    if (normalized.includes('linkedin.com/in/')) {
+      const match = normalized.match(/linkedin\.com\/in\/([^\/\?]+)/);
+      if (match) {
+        return `https://www.linkedin.com/in/${match[1]}`;
+      }
+    }
+    return normalized;
+  } catch {
+    return url;
+  }
+}
+
+// ============================================================================
 // RATE LIMITING
 // ============================================================================
 
@@ -192,6 +214,7 @@ async function startServer() {
     setupListsRoutes(app, db);
     setupPortalLeadsRoutes(app, db);
     const leads = db.collection('leads');
+    const lists = db.collection('lists');
     const exportLogs = db.collection('export_logs');
 
     await exportLogs.createIndex({ linkedinUrl: 1, exportedBy: 1 });
@@ -431,16 +454,31 @@ async function startServer() {
     });
 
     // ========================================================================
-    // POST /api/leads - Save lead with VALIDATION
+    // POST /api/leads - Save lead with VALIDATION and UPDATE on duplicate
     // ========================================================================
     app.post('/api/leads', async (req, res) => {
       try {
-        const lead = req.body;
+        const {
+          name,
+          email,
+          companyName,
+          headline,
+          currentTitle,
+          location,
+          linkedinUrl,
+          profileType,
+          sourcedBy,
+          visitorEmail,
+          visitorId,
+          emailSource,
+          emailConfidence,
+          emailPattern
+        } = req.body;
 
         // ================================================================
         // VALIDATION: Name and CompanyName required, Name cannot have digits
         // ================================================================
-        const validation = validateLead(lead, { requireCompany: true });
+        const validation = validateLead(req.body, { requireCompany: true });
         
         if (!validation.valid) {
           console.log(`❌ Lead validation failed: ${validation.errors.join(', ')}`);
@@ -452,22 +490,132 @@ async function startServer() {
           });
         }
 
-        // Additional check: email is still required for backward compatibility
-        if (!lead.email) {
-          return res.status(400).json({ success: false, message: 'Missing required field: email' });
-        }
-        // ================================================================
+        // Normalize LinkedIn URL
+        const finalUrl = normalizeLinkedInUrl(linkedinUrl);
 
-        const existing = await leads.findOne({ linkedinUrl: lead.linkedinUrl });
+        // Check for existing lead by LinkedIn URL
+        const existing = await leads.findOne({ 
+          linkedinUrl: { $regex: new RegExp(finalUrl?.split('/in/')[1]?.split('/')[0] || 'NOMATCH', 'i') }
+        });
+
         if (existing) {
-          return res.status(200).json({ message: 'Lead already exists', inserted: false });
+          // ================================================================
+          // UPDATE EXISTING LEAD instead of skipping
+          // ================================================================
+          const updateFields = {
+            updatedAt: new Date(),
+            lastScrapedAt: new Date()
+          };
+
+          // Update profile fields only if new values are provided and non-empty
+          if (name && name.trim()) {
+            updateFields.name = sanitizeString(name, 200);
+          }
+          if (companyName && companyName.trim()) {
+            updateFields.companyName = sanitizeString(companyName, 200);
+            updateFields.company = sanitizeString(companyName, 200);
+          }
+          if (currentTitle && currentTitle.trim()) {
+            updateFields.currentTitle = sanitizeString(currentTitle, 300);
+            updateFields.title = sanitizeString(currentTitle, 300);
+          }
+          if (headline && headline.trim()) {
+            updateFields.headline = sanitizeString(headline, 500);
+          }
+          if (location && location.trim()) {
+            updateFields.location = sanitizeString(location, 200);
+          }
+          if (profileType) {
+            updateFields.profileType = profileType;
+          }
+
+          // Smart email update logic:
+          // Only update email if:
+          // 1. New email is valid AND
+          // 2. Either no existing email OR new email has higher confidence AND existing not verified
+          const newEmailValid = email && email !== 'noemail@domain.com' && isValidEmail(email);
+          const existingEmailValid = existing.email && existing.email !== 'noemail@domain.com' && isValidEmail(existing.email);
+          const newEmailBetter = (emailConfidence || 0) > (existing.emailConfidence || 0);
+          const existingNotVerified = existing.emailVerified !== true;
+
+          if (newEmailValid && (!existingEmailValid || (newEmailBetter && existingNotVerified))) {
+            updateFields.email = sanitizeString(email, 200);
+            updateFields.emailSource = emailSource || 'scraped';
+            updateFields.emailConfidence = emailConfidence || 0;
+            updateFields.emailPattern = emailPattern || null;
+            
+            // Reset verification status if email changed
+            if (existing.email !== email) {
+              updateFields.emailVerified = null;
+              updateFields.emailVerifiedAt = null;
+              updateFields.emailVerificationMethod = null;
+              updateFields.emailVerificationConfidence = null;
+            }
+          }
+
+          // Perform the update
+          await leads.updateOne(
+            { _id: existing._id },
+            { $set: updateFields }
+          );
+
+          console.log(`✅ Lead updated: ${name} @ ${companyName} (data refreshed)`);
+          
+          return res.status(200).json({ 
+            success: true,
+            message: 'Lead updated', 
+            updated: true,
+            duplicate: true,
+            _id: existing._id
+          });
         }
 
-        await leads.insertOne(lead);
-        await learnFromLead(db, lead);
+        // ================================================================
+        // CREATE NEW LEAD
+        // ================================================================
+        const newLead = {
+          name: sanitizeString(name, 200),
+          email: sanitizeString(email, 200) || 'noemail@domain.com',
+          companyName: sanitizeString(companyName, 200),
+          company: sanitizeString(companyName, 200),
+          headline: sanitizeString(headline, 500) || null,
+          currentTitle: sanitizeString(currentTitle, 300) || null,
+          title: sanitizeString(currentTitle, 300) || null,
+          location: sanitizeString(location, 200) || null,
+          linkedinUrl: finalUrl,
+          url: finalUrl,
+          profileType: profileType || 'client',
+          
+          // Attribution
+          sourcedBy: sanitizeString(sourcedBy, 100) || 'Unknown',
+          visitorEmail: sanitizeString(visitorEmail, 200) || null,
+          visitorId: visitorId || null,
+          
+          // Email metadata
+          emailSource: emailSource || 'none',
+          emailConfidence: emailConfidence || 0,
+          emailPattern: emailPattern || null,
+          emailVerified: null,
+          
+          // Timestamps
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          lastScrapedAt: new Date(),
+          leadSource: 'extension'
+        };
+
+        const result = await leads.insertOne(newLead);
         
-        console.log(`✅ Lead saved: ${lead.name} @ ${lead.companyName}`);
-        res.status(200).json({ success: true, message: 'Lead saved to MongoDB!' });
+        // Learn email pattern for future generation
+        await learnFromLead(db, newLead);
+        
+        console.log(`✅ Lead created: ${name} @ ${companyName}`);
+        res.status(200).json({ 
+          success: true, 
+          message: 'Lead saved to MongoDB!',
+          _id: result.insertedId
+        });
+
       } catch (err) {
         console.error('❌ Lead save error:', err);
         res.status(500).json({ success: false, message: 'Failed to save lead.' });
@@ -959,12 +1107,13 @@ async function startServer() {
       res.json({ 
         status: 'ok', 
         timestamp: new Date().toISOString(),
-        version: '2.1.0-validated',
+        version: '2.2.0-lead-updates',
         features: {
           openaiProxy: !!process.env.OPENAI_API_KEY,
           odooIntegration: validateOdooConfig(),
           emailEnrichment: true,
-          leadValidation: true
+          leadValidation: true,
+          leadUpdates: true
         }
       });
     });
@@ -984,6 +1133,7 @@ async function startServer() {
       console.log('');
       console.log('🔐 Security: All credentials are server-side only');
       console.log('✅ Validation: Name (no digits) and CompanyName required');
+      console.log('✅ Lead Updates: Existing leads are now refreshed on re-scrape');
     });
 
   } catch (err) {
