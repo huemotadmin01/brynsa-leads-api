@@ -971,11 +971,19 @@ function setupAuthRoutes(app, db) {
 
   // ========================================================================
   // GET /api/portal/leads/:id - Get single lead (PORTAL ONLY)
+  // Skip if :id is not a valid ObjectId (let other routes handle it)
   // ========================================================================
-  app.get('/api/portal/leads/:id', authMiddleware(users), async (req, res) => {
+  app.get('/api/portal/leads/:id', authMiddleware(users), async (req, res, next) => {
     try {
       const { ObjectId } = require('mongodb');
-      const lead = await leads.findOne({ 
+
+      // Validate that id is a valid 24-char hex string (ObjectId format)
+      // If not, pass to the next route handler (e.g., /lookup)
+      if (!/^[a-fA-F0-9]{24}$/.test(req.params.id)) {
+        return next('route');
+      }
+
+      const lead = await leads.findOne({
         _id: new ObjectId(req.params.id),
         $or: [
           { visitorId: req.user._id.toString() },
