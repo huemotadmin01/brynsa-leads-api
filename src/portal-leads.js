@@ -580,8 +580,29 @@ function setupPortalLeadsRoutes(app, db) {
         return res.status(400).json({ success: false, error: 'linkedinUrl parameter required' });
       }
 
+      // Normalize URL for flexible matching (handle trailing slashes, query params)
+      const normalizedUrl = linkedinUrl.replace(/\/$/, '').toLowerCase();
+      const profileId = normalizedUrl.split('/in/')[1]?.split('/')[0]?.split('?')[0];
+
+      // Build query with multiple URL variations for better matching
+      const urlVariations = [
+        linkedinUrl,
+        linkedinUrl.replace(/\/$/, ''),
+        linkedinUrl + '/',
+        linkedinUrl.toLowerCase(),
+        linkedinUrl.toLowerCase().replace(/\/$/, ''),
+      ];
+
+      // Add profile ID regex if we can extract it
+      const urlQuery = profileId
+        ? { $or: [
+            { linkedinUrl: { $in: urlVariations } },
+            { linkedinUrl: { $regex: new RegExp(`/in/${profileId}/?$`, 'i') } }
+          ]}
+        : { linkedinUrl: { $in: urlVariations } };
+
       const lead = await leadsCollection.findOne({
-        linkedinUrl: linkedinUrl,
+        ...urlQuery,
         $or: [
           { userId: userId },
           { visitorId: userId }
