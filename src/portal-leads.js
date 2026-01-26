@@ -594,18 +594,22 @@ function setupPortalLeadsRoutes(app, db) {
       ];
 
       // Add profile ID regex if we can extract it
-      const urlQuery = profileId
-        ? { $or: [
+      // Build URL matching conditions
+      const urlConditions = profileId
+        ? [
             { linkedinUrl: { $in: urlVariations } },
             { linkedinUrl: { $regex: new RegExp(`/in/${profileId}/?$`, 'i') } }
-          ]}
-        : { linkedinUrl: { $in: urlVariations } };
+          ]
+        : [{ linkedinUrl: { $in: urlVariations } }];
 
+      // User ownership condition
+      const userCondition = { $or: [{ userId: userId }, { visitorId: userId }] };
+
+      // Combine with $and to avoid $or key collision
       const lead = await leadsCollection.findOne({
-        ...urlQuery,
-        $or: [
-          { userId: userId },
-          { visitorId: userId }
+        $and: [
+          { $or: urlConditions },
+          userCondition
         ]
       });
 
