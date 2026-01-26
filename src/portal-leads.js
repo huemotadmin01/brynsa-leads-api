@@ -364,6 +364,7 @@ function setupPortalLeadsRoutes(app, db) {
   // ==================== DELETE SINGLE LEAD (SOFT DELETE) ====================
   // Marks lead as deleted instead of removing from database
   // This preserves data for analytics while hiding from user's portal view
+  console.log('🗑️ Registering DELETE /api/portal/leads/:id route in portal-leads.js');
   app.delete('/api/portal/leads/:id', auth, async (req, res) => {
     console.log(`🗑️ DELETE request received for lead: ${req.params.id} by user: ${req.user?.email}`);
     try {
