@@ -36,13 +36,15 @@ function setupPortalLeadsRoutes(app, db) {
       const { page = 1, limit = 50, listName, search } = req.query;
 
       // Query using BOTH userId and visitorId for backward compatibility
+      // Also filter out soft-deleted leads (deleted: true)
       const query = {
         $or: [
           { userId: userId },
           { visitorId: userId }
-        ]
+        ],
+        deleted: { $ne: true }  // Exclude soft-deleted leads
       };
-      
+
       if (listName) query.lists = listName;
       if (search) {
         const searchQuery = {
@@ -56,9 +58,11 @@ function setupPortalLeadsRoutes(app, db) {
         // Combine with userId query
         query.$and = [
           { $or: [{ userId: userId }, { visitorId: userId }] },
+          { deleted: { $ne: true } },  // Exclude soft-deleted leads
           searchQuery
         ];
         delete query.$or;
+        delete query.deleted;
       }
 
       const total = await leadsCollection.countDocuments(query);
@@ -357,23 +361,37 @@ function setupPortalLeadsRoutes(app, db) {
     }
   });
 
-  // ==================== DELETE SINGLE LEAD ====================
+  // ==================== DELETE SINGLE LEAD (SOFT DELETE) ====================
+  // Marks lead as deleted instead of removing from database
+  // This preserves data for analytics while hiding from user's portal view
   app.delete('/api/portal/leads/:id', auth, async (req, res) => {
     try {
       const userId = req.user._id.toString();
-      const result = await leadsCollection.deleteOne({
-        _id: new ObjectId(req.params.id),
-        $or: [
-          { userId: userId },
-          { visitorId: userId }
-        ]
-      });
 
-      if (result.deletedCount === 0) {
+      // Soft delete: set deleted flag instead of removing
+      const result = await leadsCollection.updateOne(
+        {
+          _id: new ObjectId(req.params.id),
+          $or: [
+            { userId: userId },
+            { visitorId: userId }
+          ]
+        },
+        {
+          $set: {
+            deleted: true,
+            deletedAt: new Date(),
+            deletedBy: req.user.email,
+            updatedAt: new Date()
+          }
+        }
+      );
+
+      if (result.matchedCount === 0) {
         return res.status(404).json({ success: false, error: 'Lead not found' });
       }
 
-      console.log(`✅ Lead deleted by ${req.user.email}`);
+      console.log(`✅ Lead soft-deleted by ${req.user.email}`);
       res.json({ success: true });
     } catch (error) {
       console.error('❌ Delete lead error:', error);
@@ -381,7 +399,7 @@ function setupPortalLeadsRoutes(app, db) {
     }
   });
 
-  // ==================== BULK DELETE LEADS ====================
+  // ==================== BULK DELETE LEADS (SOFT DELETE) ====================
   app.post('/api/portal/leads/bulk-delete', auth, async (req, res) => {
     try {
       const userId = req.user._id.toString();
@@ -395,16 +413,27 @@ function setupPortalLeadsRoutes(app, db) {
         try { return new ObjectId(id); } catch (e) { return null; }
       }).filter(Boolean);
 
-      const result = await leadsCollection.deleteMany({
-        _id: { $in: objectIds },
-        $or: [
-          { userId: userId },
-          { visitorId: userId }
-        ]
-      });
+      // Soft delete: mark as deleted instead of removing
+      const result = await leadsCollection.updateMany(
+        {
+          _id: { $in: objectIds },
+          $or: [
+            { userId: userId },
+            { visitorId: userId }
+          ]
+        },
+        {
+          $set: {
+            deleted: true,
+            deletedAt: new Date(),
+            deletedBy: req.user.email,
+            updatedAt: new Date()
+          }
+        }
+      );
 
-      console.log(`✅ Bulk deleted ${result.deletedCount} leads by ${req.user.email}`);
-      res.json({ success: true, deletedCount: result.deletedCount });
+      console.log(`✅ Bulk soft-deleted ${result.modifiedCount} leads by ${req.user.email}`);
+      res.json({ success: true, deletedCount: result.modifiedCount });
     } catch (error) {
       console.error('❌ Bulk delete error:', error);
       res.status(500).json({ success: false, error: 'Failed to delete leads' });
@@ -483,7 +512,8 @@ function setupPortalLeadsRoutes(app, db) {
         $or: [
           { userId: userId },
           { visitorId: userId }
-        ]
+        ],
+        deleted: { $ne: true }  // Exclude soft-deleted leads
       });
 
       if (!lead) {
@@ -612,10 +642,12 @@ function setupPortalLeadsRoutes(app, db) {
       const userCondition = { $or: [{ userId: userId }, { visitorId: userId }] };
 
       // Combine with $and to avoid $or key collision
+      // Also exclude soft-deleted leads
       const lead = await leadsCollection.findOne({
         $and: [
           { $or: urlConditions },
-          userCondition
+          userCondition,
+          { deleted: { $ne: true } }
         ]
       });
 
