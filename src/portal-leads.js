@@ -367,16 +367,28 @@ function setupPortalLeadsRoutes(app, db) {
   app.delete('/api/portal/leads/:id', auth, async (req, res) => {
     try {
       const userId = req.user._id.toString();
+      const leadId = req.params.id;
+
+      // First, find the lead to check ownership and debug
+      const lead = await leadsCollection.findOne({ _id: new ObjectId(leadId) });
+
+      if (!lead) {
+        console.log(`❌ Delete failed: Lead ${leadId} not found in database`);
+        return res.status(404).json({ success: false, error: 'Lead not found' });
+      }
+
+      // Check ownership - allow if userId OR visitorId matches
+      const isOwner = lead.userId === userId || lead.visitorId === userId;
+
+      if (!isOwner) {
+        console.log(`❌ Delete failed: User ${userId} does not own lead ${leadId}`);
+        console.log(`   Lead userId: ${lead.userId}, visitorId: ${lead.visitorId}`);
+        return res.status(404).json({ success: false, error: 'Lead not found' });
+      }
 
       // Soft delete: set deleted flag instead of removing
       const result = await leadsCollection.updateOne(
-        {
-          _id: new ObjectId(req.params.id),
-          $or: [
-            { userId: userId },
-            { visitorId: userId }
-          ]
-        },
+        { _id: new ObjectId(leadId) },
         {
           $set: {
             deleted: true,
@@ -391,7 +403,7 @@ function setupPortalLeadsRoutes(app, db) {
         return res.status(404).json({ success: false, error: 'Lead not found' });
       }
 
-      console.log(`✅ Lead soft-deleted by ${req.user.email}`);
+      console.log(`✅ Lead ${leadId} soft-deleted by ${req.user.email}`);
       res.json({ success: true });
     } catch (error) {
       console.error('❌ Delete lead error:', error);
