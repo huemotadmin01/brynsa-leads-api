@@ -387,10 +387,17 @@ function setupPortalLeadsRoutes(app, db) {
                       lead.visitorEmail === userEmail ||
                       lead.userEmail === userEmail;
 
-      if (!isOwner) {
+      // Check if lead is truly orphaned (no ownership data at all)
+      const isOrphaned = !lead.userId && !lead.visitorId && !lead.visitorEmail && !lead.userEmail;
+
+      if (!isOwner && !isOrphaned) {
         console.log(`❌ Delete failed: User ${userId} (${userEmail}) does not own lead ${leadId}`);
         console.log(`   Lead userId: ${lead.userId}, visitorId: ${lead.visitorId}, visitorEmail: ${lead.visitorEmail}, userEmail: ${lead.userEmail}`);
         return res.status(404).json({ success: false, error: 'Lead not found' });
+      }
+
+      if (isOrphaned) {
+        console.log(`⚠️ Lead ${leadId} is orphaned (no ownership data) - allowing delete and claiming ownership`);
       }
 
       // If lead doesn't have userId/visitorId, update it now (fix orphaned leads)
