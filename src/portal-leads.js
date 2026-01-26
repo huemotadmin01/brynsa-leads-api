@@ -85,22 +85,23 @@ function setupPortalLeadsRoutes(app, db) {
   // ==================== SAVE LEAD (WITH VALIDATION AND DUPLICATE UPDATES) ====================
   app.post('/api/portal/leads/save', optionalAuth, async (req, res) => {
     try {
-      const { 
-        name, 
-        title, 
+      const {
+        name,
+        title,
         headline,
-        company, 
+        company,
         companyName,
-        location, 
-        linkedinUrl, 
-        email, 
+        location,
+        linkedinUrl,
+        email,
         phone,
         profilePicture,
         about,
         currentTitle,
         sourcedBy,
-        leadSource, 
+        leadSource,
         lists,
+        notes,  // Notes array: [{ text: string, date: string }]
         // Email metadata (for smart update logic)
         emailSource,
         emailConfidence,
@@ -205,13 +206,24 @@ function setupPortalLeadsRoutes(app, db) {
             updateFields.emailSource = emailSource || 'scraped';
             updateFields.emailConfidence = emailConfidence || 0;
             updateFields.emailPattern = emailPattern || null;
-            
+
             // Reset verification status if email changed
             if (existing.email !== email) {
               updateFields.emailVerified = null;
               updateFields.emailVerifiedAt = null;
               updateFields.emailVerificationMethod = null;
               updateFields.emailVerificationConfidence = null;
+            }
+          }
+
+          // Notes handling: merge new notes with existing notes
+          if (notes && Array.isArray(notes) && notes.length > 0) {
+            const existingNotes = existing.notes || [];
+            // Add new notes that don't already exist (by text comparison)
+            const existingTexts = new Set(existingNotes.map(n => n.text));
+            const newNotes = notes.filter(n => n.text && !existingTexts.has(n.text));
+            if (newNotes.length > 0) {
+              updateFields.notes = [...existingNotes, ...newNotes];
             }
           }
 
@@ -303,7 +315,10 @@ function setupPortalLeadsRoutes(app, db) {
         
         // Lists
         lists: lists || [],
-        
+
+        // Notes - array of { text: string, date: string }
+        notes: Array.isArray(notes) ? notes.filter(n => n && n.text) : [],
+
         // Timestamps
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -473,6 +488,132 @@ function setupPortalLeadsRoutes(app, db) {
     } catch (error) {
       console.error('❌ Get lead error:', error);
       res.status(500).json({ success: false, error: 'Failed to get lead' });
+    }
+  });
+
+  // ==================== UPDATE LEAD (GENERAL) ====================
+  app.put('/api/portal/leads/:id', auth, async (req, res) => {
+    try {
+      const userId = req.user._id.toString();
+      const { notes, ...otherFields } = req.body;
+
+      const updateFields = { updatedAt: new Date() };
+
+      // Handle notes update
+      if (notes !== undefined) {
+        updateFields.notes = Array.isArray(notes) ? notes.filter(n => n && n.text) : [];
+      }
+
+      // Handle other allowed fields
+      const allowedFields = ['name', 'title', 'headline', 'company', 'companyName', 'location', 'phone', 'about'];
+      for (const field of allowedFields) {
+        if (otherFields[field] !== undefined) {
+          updateFields[field] = sanitizeString(otherFields[field], field === 'about' ? 2000 : 500);
+        }
+      }
+
+      const result = await leadsCollection.updateOne(
+        {
+          _id: new ObjectId(req.params.id),
+          $or: [{ userId }, { visitorId: userId }]
+        },
+        { $set: updateFields }
+      );
+
+      if (result.matchedCount === 0) {
+        return res.status(404).json({ success: false, error: 'Lead not found' });
+      }
+
+      console.log(`✅ Lead ${req.params.id} updated by ${req.user.email}`);
+      res.json({ success: true });
+    } catch (error) {
+      console.error('❌ Update lead error:', error);
+      res.status(500).json({ success: false, error: 'Failed to update lead' });
+    }
+  });
+
+  // ==================== UPDATE LEAD NOTES ====================
+  app.put('/api/portal/leads/:id/notes', auth, async (req, res) => {
+    try {
+      const userId = req.user._id.toString();
+      const { notes } = req.body;
+
+      if (!Array.isArray(notes)) {
+        return res.status(400).json({ success: false, error: 'Notes must be an array' });
+      }
+
+      // Validate and sanitize notes
+      const sanitizedNotes = notes
+        .filter(n => n && n.text)
+        .map(n => ({
+          text: sanitizeString(n.text, 1000),
+          date: n.date || new Date().toLocaleDateString()
+        }));
+
+      const result = await leadsCollection.updateOne(
+        {
+          _id: new ObjectId(req.params.id),
+          $or: [{ userId }, { visitorId: userId }]
+        },
+        { $set: { notes: sanitizedNotes, updatedAt: new Date() } }
+      );
+
+      if (result.matchedCount === 0) {
+        return res.status(404).json({ success: false, error: 'Lead not found' });
+      }
+
+      console.log(`✅ Notes updated for lead ${req.params.id} by ${req.user.email}`);
+      res.json({ success: true, notes: sanitizedNotes });
+    } catch (error) {
+      console.error('❌ Update notes error:', error);
+      res.status(500).json({ success: false, error: 'Failed to update notes' });
+    }
+  });
+
+  // ==================== LOOKUP LEAD BY LINKEDIN URL (WITH NOTES) ====================
+  app.get('/api/portal/leads/lookup', auth, async (req, res) => {
+    try {
+      const userId = req.user._id.toString();
+      const { linkedinUrl } = req.query;
+
+      if (!linkedinUrl) {
+        return res.status(400).json({ success: false, error: 'linkedinUrl parameter required' });
+      }
+
+      const lead = await leadsCollection.findOne({
+        linkedinUrl: linkedinUrl,
+        $or: [
+          { userId: userId },
+          { visitorId: userId }
+        ]
+      });
+
+      if (!lead) {
+        return res.json({ success: true, exists: false, lead: null });
+      }
+
+      res.json({
+        success: true,
+        exists: true,
+        lead: {
+          _id: lead._id,
+          name: lead.name,
+          email: lead.email,
+          company: lead.company || lead.companyName,
+          companyName: lead.companyName,
+          title: lead.title || lead.currentTitle,
+          headline: lead.headline,
+          location: lead.location,
+          linkedinUrl: lead.linkedinUrl,
+          lists: lead.lists || [],
+          notes: lead.notes || [],
+          createdAt: lead.createdAt,
+          updatedAt: lead.updatedAt
+        }
+      });
+    } catch (error) {
+      console.error('❌ Lookup lead error:', error);
+      res.status(500).json({ success: false, error: 'Failed to lookup lead' });
     }
   });
 
