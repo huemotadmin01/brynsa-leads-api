@@ -1078,32 +1078,10 @@ function setupAuthRoutes(app, db) {
   });
 
   // ========================================================================
-  // DELETE /api/portal/leads/:id - Delete a lead (PORTAL ONLY)
+  // DELETE /api/portal/leads/:id - MOVED TO portal-leads.js (soft delete)
   // ========================================================================
-  app.delete('/api/portal/leads/:id', authMiddleware(users), async (req, res) => {
-    try {
-      const { ObjectId } = require('mongodb');
-      const result = await leads.deleteOne({ 
-        _id: new ObjectId(req.params.id),
-        $or: [
-          { visitorId: req.user._id.toString() },
-          { visitorId: req.user.email },
-          { visitorEmail: req.user.email },
-          { userId: req.user._id.toString() }
-        ]
-      });
-
-      if (result.deletedCount === 0) {
-        return res.status(404).json({ success: false, error: 'Lead not found' });
-      }
-
-      res.json({ success: true });
-
-    } catch (error) {
-      console.error('Delete lead error:', error);
-      res.status(500).json({ success: false, error: 'Failed to delete lead' });
-    }
-  });
+  // This route is now handled in portal-leads.js with soft delete support
+  // Keeping this comment for reference - do not add route here
 
   // ========================================================================
   // DELETE /api/user/delete-account - Delete user account
