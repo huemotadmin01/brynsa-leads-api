@@ -469,7 +469,13 @@ function setupPortalLeadsRoutes(app, db) {
   });
 
   // ==================== GET SINGLE LEAD ====================
-  app.get('/api/portal/leads/:id', auth, async (req, res) => {
+  // Skip if :id is not a valid ObjectId (let lookup route handle it)
+  app.get('/api/portal/leads/:id', auth, async (req, res, next) => {
+    // Validate that id is a valid 24-char hex string (ObjectId format)
+    if (!/^[a-fA-F0-9]{24}$/.test(req.params.id)) {
+      return next('route');
+    }
+
     try {
       const userId = req.user._id.toString();
       const lead = await leadsCollection.findOne({
