@@ -380,13 +380,26 @@ function setupPortalLeadsRoutes(app, db) {
         return res.status(404).json({ success: false, error: 'Lead not found' });
       }
 
-      // Check ownership - allow if userId OR visitorId matches
-      const isOwner = lead.userId === userId || lead.visitorId === userId;
+      // Check ownership - allow if userId, visitorId, visitorEmail, or userEmail matches
+      const userEmail = req.user.email;
+      const isOwner = lead.userId === userId ||
+                      lead.visitorId === userId ||
+                      lead.visitorEmail === userEmail ||
+                      lead.userEmail === userEmail;
 
       if (!isOwner) {
-        console.log(`❌ Delete failed: User ${userId} does not own lead ${leadId}`);
-        console.log(`   Lead userId: ${lead.userId}, visitorId: ${lead.visitorId}`);
+        console.log(`❌ Delete failed: User ${userId} (${userEmail}) does not own lead ${leadId}`);
+        console.log(`   Lead userId: ${lead.userId}, visitorId: ${lead.visitorId}, visitorEmail: ${lead.visitorEmail}, userEmail: ${lead.userEmail}`);
         return res.status(404).json({ success: false, error: 'Lead not found' });
+      }
+
+      // If lead doesn't have userId/visitorId, update it now (fix orphaned leads)
+      if (!lead.userId || !lead.visitorId) {
+        console.log(`🔧 Fixing orphaned lead ${leadId} - setting userId/visitorId to ${userId}`);
+        await leadsCollection.updateOne(
+          { _id: new ObjectId(leadId) },
+          { $set: { userId: userId, visitorId: userId } }
+        );
       }
 
       // Soft delete: set deleted flag instead of removing
