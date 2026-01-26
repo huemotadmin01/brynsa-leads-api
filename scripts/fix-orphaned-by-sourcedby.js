@@ -2,7 +2,9 @@
  * Migration Script: Fix Orphaned Leads by sourcedBy field
  *
  * This script finds orphaned leads with sourcedBy containing firstname lastname
- * and sets their userEmail based on the pattern firstname.lastname@huemot.com
+ * and sets their userEmail/visitorEmail based on the pattern firstname.lastname@huemot.com
+ *
+ * NOTE: Does NOT check if user exists in portal_users - just sets the email fields
  *
  * Run with: MONGODB_URI=$MONGO_URL node scripts/fix-orphaned-by-sourcedby.js
  */
@@ -26,7 +28,6 @@ async function fixOrphanedBySourcedBy() {
 
     const db = client.db('brynsaleads');
     const leadsCollection = db.collection('leads');
-    const usersCollection = db.collection('portal_users');
 
     // Find all orphaned leads with sourcedBy field
     const orphanedLeads = await leadsCollection.find({
@@ -47,7 +48,6 @@ async function fixOrphanedBySourcedBy() {
 
     let fixed = 0;
     let skipped = 0;
-    let userNotFound = 0;
     const skippedNames = [];
     const fixedByUser = {};
 
@@ -71,26 +71,13 @@ async function fixOrphanedBySourcedBy() {
       // Generate email from name pattern
       const generatedEmail = `${firstName.toLowerCase()}.${lastName.toLowerCase()}@huemot.com`;
 
-      // Check if this user exists in portal_users
-      const user = await usersCollection.findOne({ email: generatedEmail });
-
-      if (!user) {
-        userNotFound++;
-        console.log(`⚠️  User not found for email: ${generatedEmail} (sourcedBy: ${sourcedBy})`);
-        continue;
-      }
-
-      const userId = user._id.toString();
-
-      // Update the lead with userEmail, visitorEmail, userId, and visitorId
+      // Update the lead with userEmail and visitorEmail only (no userId/visitorId since user may not exist)
       await leadsCollection.updateOne(
         { _id: lead._id },
         {
           $set: {
             userEmail: generatedEmail,
             visitorEmail: generatedEmail,
-            userId: userId,
-            visitorId: userId,
             updatedAt: new Date()
           }
         }
@@ -99,8 +86,8 @@ async function fixOrphanedBySourcedBy() {
       fixed++;
       fixedByUser[generatedEmail] = (fixedByUser[generatedEmail] || 0) + 1;
 
-      // Log progress every 100 leads
-      if (fixed % 100 === 0) {
+      // Log progress every 500 leads
+      if (fixed % 500 === 0) {
         console.log(`✅ Fixed ${fixed} leads so far...`);
       }
     }
@@ -111,10 +98,9 @@ async function fixOrphanedBySourcedBy() {
     console.log(`   Total orphaned with sourcedBy: ${orphanedLeads.length}`);
     console.log(`   Fixed: ${fixed}`);
     console.log(`   Skipped (not firstname lastname): ${skipped}`);
-    console.log(`   User not found in portal_users: ${userNotFound}`);
 
     if (Object.keys(fixedByUser).length > 0) {
-      console.log('\n📧 Fixed leads by user:');
+      console.log('\n📧 Fixed leads by user email:');
       for (const [email, count] of Object.entries(fixedByUser)) {
         console.log(`   - ${email}: ${count} leads`);
       }
