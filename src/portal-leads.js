@@ -365,9 +365,11 @@ function setupPortalLeadsRoutes(app, db) {
   // Marks lead as deleted instead of removing from database
   // This preserves data for analytics while hiding from user's portal view
   app.delete('/api/portal/leads/:id', auth, async (req, res) => {
+    console.log(`🗑️ DELETE request received for lead: ${req.params.id} by user: ${req.user?.email}`);
     try {
       const userId = req.user._id.toString();
       const leadId = req.params.id;
+      console.log(`🗑️ Processing delete - userId: ${userId}, leadId: ${leadId}`);
 
       // First, find the lead to check ownership and debug
       const lead = await leadsCollection.findOne({ _id: new ObjectId(leadId) });
