@@ -233,9 +233,21 @@ function setupPortalLeadsRoutes(app, db) {
 
           // Build the update operation
           const updateOp = { $set: updateFields };
-          
+
+          // Track which lists are new vs already present
+          const existingLists = existing.lists || [];
+          const newListsAdded = [];
+          const alreadyInLists = [];
+
           // Add to lists if provided (using $addToSet to avoid duplicates)
           if (lists && lists.length > 0) {
+            for (const listName of lists) {
+              if (existingLists.includes(listName)) {
+                alreadyInLists.push(listName);
+              } else {
+                newListsAdded.push(listName);
+              }
+            }
             updateOp.$addToSet = { lists: { $each: lists } };
           }
 
@@ -250,9 +262,9 @@ function setupPortalLeadsRoutes(app, db) {
             for (const listName of lists) {
               await listsCollection.updateOne(
                 { userId, name: listName },
-                { 
-                  $setOnInsert: { userId, name: listName, createdAt: new Date() }, 
-                  $set: { updatedAt: new Date() } 
+                {
+                  $setOnInsert: { userId, name: listName, createdAt: new Date() },
+                  $set: { updatedAt: new Date() }
                 },
                 { upsert: true }
               );
@@ -260,13 +272,32 @@ function setupPortalLeadsRoutes(app, db) {
           }
 
           console.log(`✅ Lead updated: ${name} @ ${sanitizedCompanyName} (duplicate - data refreshed)`);
-          
-          return res.json({ 
-            success: true, 
-            duplicate: true, 
-            updated: true, 
+
+          // Determine the right message based on list status
+          let message = 'Lead updated with latest data';
+          let listStatus = 'none';
+
+          if (newListsAdded.length > 0 && alreadyInLists.length === 0) {
+            message = `Lead added to ${newListsAdded.join(', ')}`;
+            listStatus = 'added';
+          } else if (newListsAdded.length > 0 && alreadyInLists.length > 0) {
+            message = `Lead added to ${newListsAdded.join(', ')} (already in ${alreadyInLists.join(', ')})`;
+            listStatus = 'partial';
+          } else if (alreadyInLists.length > 0 && newListsAdded.length === 0) {
+            message = `Lead already in ${alreadyInLists.join(', ')}`;
+            listStatus = 'already_in_list';
+          }
+
+          return res.json({
+            success: true,
+            duplicate: true,
+            updated: true,
             leadId: existing._id,
-            message: 'Lead updated with latest data'
+            message,
+            listStatus,
+            newListsAdded,
+            alreadyInLists,
+            existingLists: [...existingLists, ...newListsAdded]
           });
         }
       }
