@@ -532,12 +532,86 @@ function setupPortalLeadsRoutes(app, db) {
     }
   });
 
+  // ==================== LOOKUP LEAD BY LINKEDIN URL (WITH NOTES) ====================
+  // IMPORTANT: This route MUST be defined BEFORE the :id route to avoid "lookup" being treated as an ID
+  app.get('/api/portal/leads/lookup', auth, async (req, res) => {
+    try {
+      const userId = req.user._id.toString();
+      const { linkedinUrl } = req.query;
+
+      if (!linkedinUrl) {
+        return res.status(400).json({ success: false, error: 'linkedinUrl parameter required' });
+      }
+
+      // Normalize URL for flexible matching (handle trailing slashes, query params)
+      const normalizedUrl = linkedinUrl.replace(/\/$/, '').toLowerCase();
+      const profileId = normalizedUrl.split('/in/')[1]?.split('/')[0]?.split('?')[0];
+
+      // Build query with multiple URL variations for better matching
+      const urlVariations = [
+        linkedinUrl,
+        linkedinUrl.replace(/\/$/, ''),
+        linkedinUrl + '/',
+        linkedinUrl.toLowerCase(),
+        linkedinUrl.toLowerCase().replace(/\/$/, ''),
+      ];
+
+      // Add profile ID regex if we can extract it
+      // Build URL matching conditions
+      const urlConditions = profileId
+        ? [
+            { linkedinUrl: { $in: urlVariations } },
+            { linkedinUrl: { $regex: new RegExp(`/in/${profileId}/?$`, 'i') } }
+          ]
+        : [{ linkedinUrl: { $in: urlVariations } }];
+
+      // User ownership condition
+      const userCondition = { $or: [{ userId: userId }, { visitorId: userId }] };
+
+      // Combine with $and to avoid $or key collision
+      // Also exclude soft-deleted leads
+      const lead = await leadsCollection.findOne({
+        $and: [
+          { $or: urlConditions },
+          userCondition,
+          { deleted: { $ne: true } }
+        ]
+      });
+
+      if (!lead) {
+        return res.json({ success: true, exists: false, lead: null });
+      }
+
+      res.json({
+        success: true,
+        exists: true,
+        lead: {
+          _id: lead._id,
+          name: lead.name,
+          email: lead.email,
+          company: lead.company || lead.companyName,
+          companyName: lead.companyName,
+          title: lead.title || lead.currentTitle,
+          headline: lead.headline,
+          location: lead.location,
+          linkedinUrl: lead.linkedinUrl,
+          lists: lead.lists || [],
+          notes: lead.notes || [],
+          createdAt: lead.createdAt,
+          updatedAt: lead.updatedAt
+        }
+      });
+    } catch (error) {
+      console.error('❌ Lookup lead error:', error);
+      res.status(500).json({ success: false, error: 'Failed to lookup lead' });
+    }
+  });
+
   // ==================== GET SINGLE LEAD ====================
-  // Skip if :id is not a valid ObjectId (let lookup route handle it)
-  app.get('/api/portal/leads/:id', auth, async (req, res, next) => {
+  app.get('/api/portal/leads/:id', auth, async (req, res) => {
     // Validate that id is a valid 24-char hex string (ObjectId format)
     if (!/^[a-fA-F0-9]{24}$/.test(req.params.id)) {
-      return next('route');
+      return res.status(400).json({ success: false, error: 'Invalid lead ID format' });
     }
 
     try {
@@ -638,80 +712,6 @@ function setupPortalLeadsRoutes(app, db) {
     } catch (error) {
       console.error('❌ Update notes error:', error);
       res.status(500).json({ success: false, error: 'Failed to update notes' });
-    }
-  });
-
-  // ==================== LOOKUP LEAD BY LINKEDIN URL (WITH NOTES) ====================
-  app.get('/api/portal/leads/lookup', auth, async (req, res) => {
-    try {
-      const userId = req.user._id.toString();
-      const { linkedinUrl } = req.query;
-
-      if (!linkedinUrl) {
-        return res.status(400).json({ success: false, error: 'linkedinUrl parameter required' });
-      }
-
-      // Normalize URL for flexible matching (handle trailing slashes, query params)
-      const normalizedUrl = linkedinUrl.replace(/\/$/, '').toLowerCase();
-      const profileId = normalizedUrl.split('/in/')[1]?.split('/')[0]?.split('?')[0];
-
-      // Build query with multiple URL variations for better matching
-      const urlVariations = [
-        linkedinUrl,
-        linkedinUrl.replace(/\/$/, ''),
-        linkedinUrl + '/',
-        linkedinUrl.toLowerCase(),
-        linkedinUrl.toLowerCase().replace(/\/$/, ''),
-      ];
-
-      // Add profile ID regex if we can extract it
-      // Build URL matching conditions
-      const urlConditions = profileId
-        ? [
-            { linkedinUrl: { $in: urlVariations } },
-            { linkedinUrl: { $regex: new RegExp(`/in/${profileId}/?$`, 'i') } }
-          ]
-        : [{ linkedinUrl: { $in: urlVariations } }];
-
-      // User ownership condition
-      const userCondition = { $or: [{ userId: userId }, { visitorId: userId }] };
-
-      // Combine with $and to avoid $or key collision
-      // Also exclude soft-deleted leads
-      const lead = await leadsCollection.findOne({
-        $and: [
-          { $or: urlConditions },
-          userCondition,
-          { deleted: { $ne: true } }
-        ]
-      });
-
-      if (!lead) {
-        return res.json({ success: true, exists: false, lead: null });
-      }
-
-      res.json({
-        success: true,
-        exists: true,
-        lead: {
-          _id: lead._id,
-          name: lead.name,
-          email: lead.email,
-          company: lead.company || lead.companyName,
-          companyName: lead.companyName,
-          title: lead.title || lead.currentTitle,
-          headline: lead.headline,
-          location: lead.location,
-          linkedinUrl: lead.linkedinUrl,
-          lists: lead.lists || [],
-          notes: lead.notes || [],
-          createdAt: lead.createdAt,
-          updatedAt: lead.updatedAt
-        }
-      });
-    } catch (error) {
-      console.error('❌ Lookup lead error:', error);
-      res.status(500).json({ success: false, error: 'Failed to lookup lead' });
     }
   });
 
