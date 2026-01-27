@@ -27,12 +27,13 @@ function setupListsRoutes(app, db) {
       // Get all lists for user
       const lists = await listsCollection.find({ userId }).sort({ createdAt: -1 }).toArray();
       
-      // Get lead counts for each list
+      // Get lead counts for each list (excluding soft-deleted leads)
       const listsWithCounts = await Promise.all(
         lists.map(async (list) => {
           const count = await leadsCollection.countDocuments({
-            visitorId: userId,
-            lists: list.name
+            $or: [{ userId }, { visitorId: userId }],
+            lists: list.name,
+            deleted: { $ne: true }  // Exclude soft-deleted leads
           });
           return {
             _id: list._id,
@@ -111,7 +112,7 @@ function setupListsRoutes(app, db) {
 
       // Remove list from all leads (keep leads, just remove list association)
       await leadsCollection.updateMany(
-        { visitorId: userId, lists: listName },
+        { $or: [{ userId }, { visitorId: userId }], lists: listName },
         { $pull: { lists: listName } }
       );
 
@@ -134,15 +135,20 @@ function setupListsRoutes(app, db) {
       const limit = parseInt(req.query.limit) || 10;
       const skip = (page - 1) * limit;
 
-      // Get total count
+      // Get total count (excluding soft-deleted leads)
       const total = await leadsCollection.countDocuments({
-        visitorId: userId,
-        lists: listName
+        $or: [{ userId }, { visitorId: userId }],
+        lists: listName,
+        deleted: { $ne: true }  // Exclude soft-deleted leads
       });
 
-      // Get paginated leads
+      // Get paginated leads (excluding soft-deleted leads)
       const leads = await leadsCollection
-        .find({ visitorId: userId, lists: listName })
+        .find({
+          $or: [{ userId }, { visitorId: userId }],
+          lists: listName,
+          deleted: { $ne: true }  // Exclude soft-deleted leads
+        })
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -165,6 +171,7 @@ function setupListsRoutes(app, db) {
   // Create indexes
   listsCollection.createIndex({ userId: 1, name: 1 }, { unique: true }).catch(() => {});
   leadsCollection.createIndex({ visitorId: 1, lists: 1 }).catch(() => {});
+  leadsCollection.createIndex({ userId: 1, lists: 1 }).catch(() => {});
 
   console.log('✅ Lists routes registered: /api/lists');
 }

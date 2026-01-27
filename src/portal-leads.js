@@ -150,14 +150,22 @@ function setupPortalLeadsRoutes(app, db) {
         return res.status(401).json({ success: false, error: 'Authentication required' });
       }
 
-      // Check duplicate - using BOTH userId and visitorId for backward compat
+      // Check duplicate - using userId, visitorId, AND email for backward compat with migrated leads
       if (linkedinUrl) {
-        const existing = await leadsCollection.findOne({ 
+        const ownershipConditions = [
+          { userId: userId },
+          { visitorId: userId }
+        ];
+        // Also check email-based ownership (for leads migrated with userEmail/visitorEmail)
+        if (userEmail) {
+          ownershipConditions.push({ userEmail: userEmail });
+          ownershipConditions.push({ visitorEmail: userEmail });
+        }
+
+        const existing = await leadsCollection.findOne({
           linkedinUrl,
-          $or: [
-            { userId: userId },
-            { visitorId: userId }
-          ]
+          $or: ownershipConditions,
+          deleted: { $ne: true }  // Don't match soft-deleted leads
         });
         
         if (existing) {
