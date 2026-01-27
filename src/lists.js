@@ -23,15 +23,26 @@ function setupListsRoutes(app, db) {
   app.get('/api/lists', auth, async (req, res) => {
     try {
       const userId = req.user._id.toString();
-      
+      const userEmail = req.user.email;
+
       // Get all lists for user
       const lists = await listsCollection.find({ userId }).sort({ createdAt: -1 }).toArray();
-      
+
+      // Build ownership conditions (include email-based ownership for backward compatibility)
+      const ownershipConditions = [
+        { userId: userId },
+        { visitorId: userId }
+      ];
+      if (userEmail) {
+        ownershipConditions.push({ userEmail: userEmail });
+        ownershipConditions.push({ visitorEmail: userEmail });
+      }
+
       // Get lead counts for each list (excluding soft-deleted leads)
       const listsWithCounts = await Promise.all(
         lists.map(async (list) => {
           const count = await leadsCollection.countDocuments({
-            $or: [{ userId }, { visitorId: userId }],
+            $or: ownershipConditions,
             lists: list.name,
             deleted: { $ne: true }  // Exclude soft-deleted leads
           });
@@ -101,6 +112,7 @@ function setupListsRoutes(app, db) {
   app.delete('/api/lists/:listName', auth, async (req, res) => {
     try {
       const userId = req.user._id.toString();
+      const userEmail = req.user.email;
       const listName = decodeURIComponent(req.params.listName);
 
       // Delete the list
@@ -110,9 +122,19 @@ function setupListsRoutes(app, db) {
         return res.status(404).json({ success: false, error: 'List not found' });
       }
 
+      // Build ownership conditions (include email-based ownership for backward compatibility)
+      const ownershipConditions = [
+        { userId: userId },
+        { visitorId: userId }
+      ];
+      if (userEmail) {
+        ownershipConditions.push({ userEmail: userEmail });
+        ownershipConditions.push({ visitorEmail: userEmail });
+      }
+
       // Remove list from all leads (keep leads, just remove list association)
       await leadsCollection.updateMany(
-        { $or: [{ userId }, { visitorId: userId }], lists: listName },
+        { $or: ownershipConditions, lists: listName },
         { $pull: { lists: listName } }
       );
 
@@ -130,14 +152,25 @@ function setupListsRoutes(app, db) {
   app.get('/api/lists/:listName/leads', auth, async (req, res) => {
     try {
       const userId = req.user._id.toString();
+      const userEmail = req.user.email;
       const listName = decodeURIComponent(req.params.listName);
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 10;
       const skip = (page - 1) * limit;
 
+      // Build ownership conditions (include email-based ownership for backward compatibility)
+      const ownershipConditions = [
+        { userId: userId },
+        { visitorId: userId }
+      ];
+      if (userEmail) {
+        ownershipConditions.push({ userEmail: userEmail });
+        ownershipConditions.push({ visitorEmail: userEmail });
+      }
+
       // Get total count (excluding soft-deleted leads)
       const total = await leadsCollection.countDocuments({
-        $or: [{ userId }, { visitorId: userId }],
+        $or: ownershipConditions,
         lists: listName,
         deleted: { $ne: true }  // Exclude soft-deleted leads
       });
@@ -145,7 +178,7 @@ function setupListsRoutes(app, db) {
       // Get paginated leads (excluding soft-deleted leads)
       const leads = await leadsCollection
         .find({
-          $or: [{ userId }, { visitorId: userId }],
+          $or: ownershipConditions,
           lists: listName,
           deleted: { $ne: true }  // Exclude soft-deleted leads
         })

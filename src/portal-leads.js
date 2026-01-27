@@ -162,10 +162,33 @@ function setupPortalLeadsRoutes(app, db) {
           ownershipConditions.push({ visitorEmail: userEmail });
         }
 
-        const existing = await leadsCollection.findOne({
+        // Normalize URL for flexible matching (handle trailing slashes, query params)
+        const normalizedUrl = linkedinUrl.replace(/\/$/, '').toLowerCase();
+        const profileId = normalizedUrl.split('/in/')[1]?.split('/')[0]?.split('?')[0];
+
+        // Build URL variations for better matching
+        const urlVariations = [
           linkedinUrl,
-          $or: ownershipConditions,
-          deleted: { $ne: true }  // Don't match soft-deleted leads
+          linkedinUrl.replace(/\/$/, ''),
+          linkedinUrl + '/',
+          linkedinUrl.toLowerCase(),
+          linkedinUrl.toLowerCase().replace(/\/$/, ''),
+        ];
+
+        // Build URL matching conditions
+        const urlConditions = profileId
+          ? [
+              { linkedinUrl: { $in: urlVariations } },
+              { linkedinUrl: { $regex: new RegExp(`/in/${profileId}/?$`, 'i') } }
+            ]
+          : [{ linkedinUrl: { $in: urlVariations } }];
+
+        const existing = await leadsCollection.findOne({
+          $and: [
+            { $or: urlConditions },
+            { $or: ownershipConditions },
+            { deleted: { $ne: true } }  // Don't match soft-deleted leads
+          ]
         });
         
         if (existing) {
