@@ -33,15 +33,22 @@ function setupPortalLeadsRoutes(app, db) {
   app.get('/api/portal/leads', auth, async (req, res) => {
     try {
       const userId = req.user._id.toString();
+      const userEmail = req.user.email;
       const { page = 1, limit = 50, listName, search } = req.query;
 
-      // Query using BOTH userId and visitorId for backward compatibility
-      // Also filter out soft-deleted leads (deleted: true)
+      // Build ownership conditions (include email-based ownership for backward compatibility)
+      const ownershipConditions = [
+        { userId: userId },
+        { visitorId: userId }
+      ];
+      if (userEmail) {
+        ownershipConditions.push({ userEmail: userEmail });
+        ownershipConditions.push({ visitorEmail: userEmail });
+      }
+
+      // Query using ownership conditions and filter out soft-deleted leads
       const query = {
-        $or: [
-          { userId: userId },
-          { visitorId: userId }
-        ],
+        $or: ownershipConditions,
         deleted: { $ne: true }  // Exclude soft-deleted leads
       };
 
@@ -55,9 +62,9 @@ function setupPortalLeadsRoutes(app, db) {
             { email: { $regex: search, $options: 'i' } }
           ]
         };
-        // Combine with userId query
+        // Combine with ownership query
         query.$and = [
-          { $or: [{ userId: userId }, { visitorId: userId }] },
+          { $or: ownershipConditions },
           { deleted: { $ne: true } },  // Exclude soft-deleted leads
           searchQuery
         ];
