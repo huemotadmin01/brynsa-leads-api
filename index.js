@@ -1107,7 +1107,7 @@ async function startServer() {
       res.json({ 
         status: 'ok', 
         timestamp: new Date().toISOString(),
-        version: '2.2.0-lead-updates',
+        version: '2.3.0-soft-delete-fix',
         features: {
           openaiProxy: !!process.env.OPENAI_API_KEY,
           odooIntegration: validateOdooConfig(),
