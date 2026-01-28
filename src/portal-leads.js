@@ -36,6 +36,8 @@ function setupPortalLeadsRoutes(app, db) {
       const userEmail = req.user.email;
       const { page = 1, limit = 50, listName, search } = req.query;
 
+      console.log(`📋 GET /api/portal/leads - userId: ${userId}, userEmail: ${userEmail}`);
+
       // Build ownership conditions (include email-based ownership for backward compatibility)
       const ownershipConditions = [
         { userId: userId },
@@ -47,12 +49,17 @@ function setupPortalLeadsRoutes(app, db) {
       }
 
       // Query using ownership conditions and filter out soft-deleted leads
+      // IMPORTANT: Using $and to ensure deleted filter is always applied
       const query = {
-        $or: ownershipConditions,
-        deleted: { $ne: true }  // Exclude soft-deleted leads
+        $and: [
+          { $or: ownershipConditions },
+          { $or: [{ deleted: { $ne: true } }, { deleted: { $exists: false } }] }
+        ]
       };
 
-      if (listName) query.lists = listName;
+      if (listName) {
+        query.$and.push({ lists: listName });
+      }
       if (search) {
         const searchQuery = {
           $or: [
@@ -62,15 +69,10 @@ function setupPortalLeadsRoutes(app, db) {
             { email: { $regex: search, $options: 'i' } }
           ]
         };
-        // Combine with ownership query
-        query.$and = [
-          { $or: ownershipConditions },
-          { deleted: { $ne: true } },  // Exclude soft-deleted leads
-          searchQuery
-        ];
-        delete query.$or;
-        delete query.deleted;
+        query.$and.push(searchQuery);
       }
+
+      console.log(`📋 Query: ${JSON.stringify(query).substring(0, 200)}...`);
 
       const total = await leadsCollection.countDocuments(query);
       const leads = await leadsCollection
