@@ -942,37 +942,20 @@ function setupAuthRoutes(app, db) {
   });
 
   // ========================================================================
-  // GET /api/portal/leads - Get user's saved leads (PORTAL ONLY - requires auth)
-  // RENAMED to avoid conflict with public /api/leads
+  // GET /api/portal/leads - MOVED TO portal-leads.js (with soft delete support)
   // ========================================================================
-  app.get('/api/portal/leads', authMiddleware(users), async (req, res) => {
-    try {
-      // Use visitorId to match existing leads schema
-      // visitorId can be the user's _id (as string) or email
-      const userLeads = await leads.find({ 
-        $or: [
-          { visitorId: req.user._id.toString() },
-          { visitorId: req.user.email },
-          { visitorEmail: req.user.email },
-          { userId: req.user._id.toString() },  // Also check userId field
-          { sourcedBy: { $regex: new RegExp(`^${escapeRegex(req.user.name || '')}$`, 'i') } }  // Match by name
-        ]
-      })
-        .sort({ createdAt: -1 })
-        .toArray();
-
-      res.json({ success: true, leads: userLeads });
-
-    } catch (error) {
-      console.error('Get leads error:', error);
-      res.status(500).json({ success: false, error: 'Failed to get leads' });
-    }
-  });
+  // This route is now handled in portal-leads.js with:
+  // - Soft delete filtering (deleted: { $ne: true })
+  // - Email-based ownership checking
+  // - Better query structure
+  // DO NOT ADD ROUTE HERE - it would conflict with portal-leads.js
 
   // ========================================================================
-  // GET /api/portal/leads/:id - Get single lead (PORTAL ONLY)
-  // Skip if :id is not a valid ObjectId (let other routes handle it)
+  // GET /api/portal/leads/:id - MOVED TO portal-leads.js
   // ========================================================================
+  // This route is now handled in portal-leads.js
+  // DO NOT ADD ROUTE HERE - it would conflict with portal-leads.js
+  /* REMOVED - Duplicate route
   app.get('/api/portal/leads/:id', authMiddleware(users), async (req, res, next) => {
     try {
       const { ObjectId } = require('mongodb');
@@ -1004,17 +987,21 @@ function setupAuthRoutes(app, db) {
       res.status(500).json({ success: false, error: 'Failed to get lead' });
     }
   });
+  END OF REMOVED GET /api/portal/leads/:id */
 
   // ========================================================================
-  // POST /api/portal/leads - Save a new lead (PORTAL ONLY - requires auth)
-  // RENAMED to avoid conflict with public /api/leads
+  // POST /api/portal/leads - MOVED TO portal-leads.js (as /api/portal/leads/save)
   // ========================================================================
+  // This route is now handled in portal-leads.js as POST /api/portal/leads/save
+  // with better duplicate detection and soft-delete awareness
+  // DO NOT ADD ROUTE HERE - it would conflict with portal-leads.js
+  /* REMOVED - Duplicate route
   app.post('/api/portal/leads', authMiddleware(users), async (req, res) => {
     try {
-      const { 
-        name, title, company, companyId, location, 
+      const {
+        name, title, company, companyId, location,
         linkedinUrl, profilePicture, email, phone,
-        about, leadSource 
+        about, leadSource
       } = req.body;
 
       if (!name && !linkedinUrl) {
@@ -1023,7 +1010,7 @@ function setupAuthRoutes(app, db) {
 
       // Check for duplicate using visitorId or email
       if (linkedinUrl) {
-        const existing = await leads.findOne({ 
+        const existing = await leads.findOne({
           linkedinUrl,
           $or: [
             { visitorId: req.user._id.toString() },
@@ -1066,8 +1053,8 @@ function setupAuthRoutes(app, db) {
         { $inc: { 'usage.leadsScraped': 1 } }
       );
 
-      res.json({ 
-        success: true, 
+      res.json({
+        success: true,
         lead: { ...newLead, _id: result.insertedId }
       });
 
@@ -1076,6 +1063,7 @@ function setupAuthRoutes(app, db) {
       res.status(500).json({ success: false, error: 'Failed to save lead' });
     }
   });
+  END OF REMOVED POST /api/portal/leads */
 
   // ========================================================================
   // DELETE /api/portal/leads/:id - MOVED TO portal-leads.js (soft delete)

@@ -1107,7 +1107,7 @@ async function startServer() {
       res.json({ 
         status: 'ok', 
         timestamp: new Date().toISOString(),
-        version: '2.3.1-query-fix',
+        version: '2.4.0-remove-duplicate-routes',
         features: {
           openaiProxy: !!process.env.OPENAI_API_KEY,
           odooIntegration: validateOdooConfig(),
