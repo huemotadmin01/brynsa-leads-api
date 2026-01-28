@@ -507,6 +507,7 @@ function setupPortalLeadsRoutes(app, db) {
   app.post('/api/portal/leads/bulk-delete', auth, async (req, res) => {
     try {
       const userId = req.user._id.toString();
+      const userEmail = req.user.email;
       const { ids } = req.body;
 
       if (!ids || !Array.isArray(ids) || ids.length === 0) {
@@ -517,14 +518,21 @@ function setupPortalLeadsRoutes(app, db) {
         try { return new ObjectId(id); } catch (e) { return null; }
       }).filter(Boolean);
 
+      // Build ownership conditions (include email-based ownership for backward compatibility)
+      const ownershipConditions = [
+        { userId: userId },
+        { visitorId: userId }
+      ];
+      if (userEmail) {
+        ownershipConditions.push({ userEmail: userEmail });
+        ownershipConditions.push({ visitorEmail: userEmail });
+      }
+
       // Soft delete: mark as deleted instead of removing
       const result = await leadsCollection.updateMany(
         {
           _id: { $in: objectIds },
-          $or: [
-            { userId: userId },
-            { visitorId: userId }
-          ]
+          $or: ownershipConditions
         },
         {
           $set: {
